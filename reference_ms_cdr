@@ -1,0 +1,883 @@
+-- Zoom MS70-CDR Effects pedal
+--
+-- 1000-1006 reserved for Program change
+-- 1100-1610 reserved for Virtual parameters per FX: type + 9 param + on/off
+-- all other virtual parameters are numbered after their control ID
+
+------------------------------------------ Initialisation --------------------------------------------------------------------------
+authorDate ="New Ignis 2024"
+info.setText(authorDate)
+--assert(controller.isRequired(MODEL_MK2, "3.6.0"), "Version 3.6.0 or higher is required" )
+deviceId = 1 -- the device ID used in the E1 preset
+device = devices.get(deviceId)
+devPort = device:getPort()
+devChannel = device:getChannel()
+zoomDeviceID = 0x00 -- the Zoom Device ID as to be used in the SysEx commands
+zoomModelID = 0x61 -- 0x61 for MS70CDR, 0x58 for MS-50G, 0x5F for MS-60B
+editMode = 0
+patchNumber = 0
+x= 700 -- no Overlay
+local formatToApply = {} -- stores the format to assign dynamically
+for i = 0,8 do
+  formatToApply[i] = 0
+end
+
+-------------------------------------------------------- SYSEX SUPPORT -------------------------------------------------------------
+
+function sysExDeviceID()
+  return zoomDeviceID
+end
+
+function sysExModelID()
+  return zoomModelID
+end
+
+function setEdit(valueObject, value)
+  editMode = value
+end
+
+function prepareToXmit (valueObject) -- Set XMIT on , color RED
+  local ctlId = valueObject:getControl():getId() -- ref id
+  controls.get(41):setVisible(true)
+  controls.get(43):setVisible(true)
+  controls.get(ctlId):setColor(0x6F0004) 
+end
+
+function parameterMap.onChange(valueObjects, origin, value)
+  if origin == MIDI then
+    --print ("line 53 origin = MIDI: "..origin) 
+    for i, valueObject in ipairs(valueObjects) do -- process incoming SysEx fx Type and parameter change changes
+      local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+      if parameterNumber >= 121 and parameterNumber <= 126 then -- process incoming SysEx fxType
+        selectFxType(valueObject,value,parameterNumber) -- values 121..126
+      elseif parameterNumber >= 30 and parameterNumber <= 35 then -- process incoming SysEx unit on/off 
+        local fxUnit = 5 - parameterMap.get (deviceId, PT_VIRTUAL,17) -- values 0..5
+        if parameterNumber - 30 == fxUnit then parameterMap.set (deviceId, PT_VIRTUAL, 128, value) end
+      elseif parameterNumber >= 39 and parameterNumber <= 39 then -- process incoming SysEx parameter change messages
+        local fxUnit = parameterMap.get (deviceId, PT_VIRTUAL,37) -- values 0..5
+        local paramToChange = parameterMap.get (deviceId, PT_VIRTUAL,38)-2 -- values -2..9
+        if paramToChange > 8 then return end
+        local valueToChange = parameterMap.get (deviceId, PT_VIRTUAL,39)
+        --print(string.format("sysEx midiValue %d received for fxUnit %d, parameter %d", valueToChange,fxUnit+1,paramToChange+1))
+        if paramToChange >=  0 then parameterMap.set (deviceId, PT_VIRTUAL, 61 + paramToChange + fxUnit*9, valueToChange) end
+        if paramToChange == -2 then parameterMap.set (deviceId, PT_VIRTUAL, 30 + fxUnit, valueToChange) end--on/off
+        if parameterMap.get (deviceId, PT_VIRTUAL,17) == 5- fxUnit then
+          parameterMap.set (deviceId, PT_VIRTUAL, 20 + paramToChange, valueToChange)
+        end
+      end
+    end
+    return 
+  end
+  if origin == LUA then
+    return
+  end
+  -- onChange manually
+  for i, valueObject in ipairs(valueObjects) do -- process changes on unit parameters, done on the E1
+    local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+    local fxUnit = 5 - parameterMap.get (deviceId, PT_VIRTUAL,17) -- values 0..5
+    if parameterNumber == 128 then 
+      parameterMap.set (deviceId, PT_VIRTUAL, 30 + fxUnit, value)
+    elseif parameterNumber >= 20 and parameterNumber <= 28 then
+            local paramToSend = parameterNumber - 20 -- values 0..9
+      --print(string.format("sysEx midiValue %d sent for fxUnit %d, parameter %d", value,fxUnit+1,paramToSend-1))
+      parameterMap.set (deviceId, PT_VIRTUAL, 61 + paramToSend + fxUnit*9, value)
+      midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x31,fxUnit,paramToSend + 2,value%128,value>>7})
+    elseif parameterNumber >= 2 and parameterNumber <= 11 then -- change name
+        prepareToXmit (valueObject) -- Set XMIT on
+    elseif parameterNumber == 14 then -- change number of effect slots
+        prepareToXmit (valueObject) -- Set XMIT on
+    elseif parameterNumber == 18 then -- change tempo
+        prepareToXmit (valueObject) -- Set XMIT on
+    elseif parameterNumber >= 30 and parameterNumber <= 35 then -- process incoming SysEx unit on/off 
+      if parameterNumber - 30 == fxUnit then parameterMap.set (deviceId, PT_VIRTUAL, 128, value) end
+      if parameterNumber >= 33 then 
+          prepareToXmit (valueObject) -- Set XMIT on
+      end 
+    elseif parameterNumber == 40 or parameterNumber == 60 then -- change fx type
+      prepareToXmit (valueObject) -- Set XMIT on
+    else
+      return
+    end
+  end
+end
+
+function unitOnOff(valueObject, value) -- only for units 1-3
+  if (origin == MIDI) then return end
+  local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+  local fxUnit = parameterNumber - 30
+  midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x31,fxUnit,0x00,value,0x00})
+end
+
+function formatPar(valueObject, value)
+  local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+  local i = parameterNumber - 20
+  --print ("line 116: formatToApply[i]= "..formatToApply[i].." with i = "..i)
+  local labels = {"1/32 note","1/16 note","1/12 note","3/32 note", "1/8 note","1/6 note","3/16 note","1/4 note","3/8 note"}
+  if     formatToApply[i]==0    then return string.format("%d",value)
+  elseif formatToApply[i]==10090 then return string.format("%.1f",1+value/10) -- 1.0–10.0
+  elseif formatToApply[i]==10047 then -- Sn1–16, Tr1–16, Sq1–16
+    if value <= 15 then return string.format("Sine %d",value+1)
+      elseif value <= 31 then return string.format("Triangle %d",value-15)    
+      else return string.format("Square %d",value-31)
+    end
+  elseif formatToApply[i]==10052 then --1/4, 1/2, 3/4, 1–50
+     labels = {"1/4","1/2","3/4"}
+    if value <= 2 then return labels [value]
+      else return string.format("%d",value-2)
+    end
+  elseif formatToApply[i]==10300 then  -- 1-300,Sync
+    if value == 300 then return "sync"
+      else return string.format("%d",value)
+    end
+  elseif formatToApply[i]==10100 then  -- L50..L1, 0, R1..R50
+    if value <= 49 then return string.format("Left %d",50-value)
+      elseif value >= 51 then return string.format("Right %d",value-50)
+      else return "Center"
+    end
+  elseif formatToApply[i]==10101 then  -- M-0–50, S-0–50
+    if value <= 50 then return string.format("Mono-%d",value)
+      else return string.format("Stereo-%d",value-51)
+    end
+  elseif formatToApply[i]==10199 then  -- MN0–MN99, ST0–ST99
+    if value <= 99 then return string.format("Mono-%d",value)
+      else return string.format("Stereo-%d",value-100)
+    end
+  elseif formatToApply[i]==11915 then -- 0- 1900,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1900 then return string.format("%d",value)
+      elseif value <= 1900+8 then return labels [value+1-(1900)]
+      else return string.format("%d/4 notes",value-(1900+8-1))
+    end
+  elseif formatToApply[i]==11914 then -- 1- 1900,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1900-1 then return string.format("%d",value+1)
+      elseif value <= 1900-1+8 then return labels [value+1-(1900-1)]
+      else return string.format("%d/4 notes",value-(1900-1+8-1))
+    end
+  elseif formatToApply[i]==11985 then -- 20-1990,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1990-20 then return string.format("%d",value+20)
+      elseif value <= 1990-20+8 then return labels [value+1-(1990-20)]
+      else return string.format("%d/4 notes",value-(1990-20+8-1))
+    end
+  elseif formatToApply[i]==12004 then -- 0-1990,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2/4 etc
+    if value <= 1990-0 then return string.format("%d",value+0)
+      elseif value <= 1990-0+8 then return labels [value+1-(1990-0)]
+      else return string.format("%d/4 notes",value-(1990-0+8-1))
+    end
+  elseif formatToApply[i]==11913 then -- 2- 1900,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1900-2 then return string.format("%d",value+2)
+      elseif value <= 1900-2+8 then return labels [value+1-(1900-2)]
+      else return string.format("%d/4 notes",value-(1900-2+8-1))
+    end
+  elseif formatToApply[i]==11855 then -- 60-1900,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1900-60 then return string.format("%d",value+60)
+      elseif value <= 1900-60+8 then return labels [value+1-(1900-60)]
+      else return string.format("%d/4 notes",value-(1900-60+8-1))
+    end
+  elseif formatToApply[i]==11014 then -- 1- 1000,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2/4 etc
+    if value <= 1000-1 then return string.format("%d",value+1)
+      elseif value <= 1000-1+8 then return labels [value+1-(1000-1)]
+      else return string.format("%d/4 notes",value-(1000-1+8-1))
+    end
+  elseif formatToApply[i]==11255 then -- 60-1300,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 1300-60 then return string.format("%d",value+60)
+      elseif value <= 1300-60+8 then return labels [value+1-(1300-60)]
+      else return string.format("%d/4 notes",value-(1300-60+8-1))
+    end
+  elseif formatToApply[i]==12014 then -- 1- 2000,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 2000-1 then return string.format("%d",value+1)
+      elseif value <= 2000-1+8 then return labels [value+1-(2000-1)]
+      else return string.format("%d/4 notes",value-(2000-1+8-1))
+    end
+  elseif formatToApply[i]==13018 then -- 1- 3000,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-12/4
+    if value <= 3000-1 then return string.format("%d",value+1)
+      elseif value <= 3000-1+8 then return labels [value+1-(3000-1)]
+      else return string.format("%d/4 notes",value-(3000-1+8-1))
+    end
+  elseif formatToApply[i]==12005 then -- 10-2000,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-8/4
+    if value <= 2000-10 then return string.format("%d",value+1)
+      elseif value <= 2000-10+8 then return labels [value+1-(2000-10)]
+      else return string.format("%d/4 notes",value-(2000-10+8-1))
+    end
+  elseif formatToApply[i]==14022 then -- 1- 4000,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-16/4
+    if value <= 4000-1 then return string.format("%d",value+1)
+      elseif value <= 4000-1+8 then return labels [value+1-(4000-1)]
+      else return string.format("%d/4 notes",value-(4000-1+8-1))
+    end
+  elseif formatToApply[i]==10128 then -- 0-100,1/32,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2/4 etc
+    if value <= 100-0 then return string.format("%d",value+0)
+      elseif value <= 100-0+9 then return labels [value-(100-0)]
+      else return string.format("%d/4 notes",value-(100-0+9-1))
+    end
+  elseif formatToApply[i]==10078 then -- 0-50,1/32,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-20/4
+    if value <= 50-0 then return string.format("%d",value+0)
+      elseif value <= 50-0+9 then return labels [value-(50-0)]
+      else return string.format("%d/4 notes",value-(50-0+9-1))
+    end
+  elseif formatToApply[i]==10077 then -- 1-50,1/32,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-20/4
+    if value <= 50-1 then return string.format("%d",value+1)
+      elseif value <= 50-1+9 then return labels [value-(50-1)]
+      else return string.format("%d/4 notes",value-(50-1+9-1))
+    end
+  elseif formatToApply[i]==10051 then -- 1-50,Sync A, Reverse A
+    labels = {"Sync A","Reverse A"}
+    if value <= 50-1 then return string.format("%d",value+1)
+      elseif value <= 50-1+2 then return labels [value-(50-1)]
+    end
+  elseif formatToApply[i]==10218 then -- 1.0-20.0,1/32,1/16,1/12,3/32,1/8,1/6,3/16,1/4,3/8,2-20/4
+    if value <= 200-10 then return string.format("%.1f",1+value/10)
+      elseif value <= 200-10+9 then return labels [value-(200-10)]
+      else return string.format("%d/4 notes",value-(200-10+9-1))
+    end
+  end
+  return string.format("%d",value)
+end
+
+---------------------------------------------------------- show and hide ------------------------------------------------
+
+function displayPatch (valueObject, value) -- patch number
+  patchNumber = string.format("%02d",math.floor(value))
+  return (patchNumber)
+end
+
+function displayName (valueObject, value)
+  local patchName = ""
+  for i = 2, 11 do
+    patchName = patchName .. string.char (parameterMap.get (deviceId, PT_VIRTUAL, i))
+  end
+   if patchName == "" or patchName == "          " then
+    info.setText(authorDate)
+    controls.get (229):setName ("SELECT PATCH")
+    controls.get (50) :setName ("SELECT PATCH")
+  else 
+    info.setText(patchNumber..". "..patchName)
+    controls.get (229):setName (patchName)
+    controls.get (50) :setName (patchName)
+  end
+  return string.char(value)
+end
+
+function selectFxUnit (valueObject, value) -- highlights the correct FX unit
+  for i = 0,5 do
+    local color = BLUE
+    if i == value then color = 0x8ABA7A end
+    controls.get (i+30):setColor(color) -- on/off buttons
+  end
+  hideCtl (valueObject,value)
+  parameterMap.set(deviceId, PT_VIRTUAL, 60, (parameterMap.get (deviceId, PT_VIRTUAL, 121 + value))) -- fxTypeID
+  parameterMap.set(deviceId, PT_VIRTUAL, 128, (parameterMap.get (deviceId, PT_VIRTUAL, 30 + value))) -- on/off
+  for i = 0,9 do
+    parameterMap.set(deviceId, PT_VIRTUAL, 20 + i, (parameterMap.get (deviceId, PT_VIRTUAL, 61 + value *9 + i)))
+  end
+  selectFxType(valueObject,0,value)
+end
+
+function colWhite(valueObject,value) -- generic function to set control color
+  local color = WHITE --0xFFFFFF
+  if value == 0 then color = 0x202020 end -- 
+  local ctlId = valueObject:getControl():getId()
+  controls.get (ctlId):setColor(color)
+  return string.format("%d",value)
+end
+
+function hideCtl (valueObject,value) ---- hides the non used controls 
+  local ctlId = valueObject:getControl():getId() -- ref id
+  if ctlId == 14 then -- change number of effect slots
+    for i = 0, 5 do
+        controls.get(i + 30):setVisible (i < value) -- on/off buttons
+    end
+    for i = 0, 8 do
+      controls.get(i + 20):setVisible (parameterMap.get (deviceId, PT_VIRTUAL,17) < value) -- fx parameters
+    end
+  elseif ctlId == 17 then -- change selected effect unit
+    local numberFx = parameterMap.get (deviceId, PT_VIRTUAL,14)
+    for i = 0, 8 do
+      controls.get(i + 20):setVisible (value <= numberFx) -- fx parameters
+    end
+  elseif ctlId == 57 then -- DSP Full temp
+      controls.get(57):setVisible (value >0) -- DSP Full
+      controls.get(59):setVisible (value >0) -- DSP Full
+  end
+end
+
+----------------------------------------------------- Page Switching ------------------------------------------------------------
+
+function switchPage(valueObject, value)
+  if value <= 0 or value > 12 then return end
+  local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+  local value = parameterMap.get (deviceId, PT_VIRTUAL,parameterNumber)
+  pages.display(value)
+end
+-------------------------------------------------------- DEFINE OVERLAYS----------------------------------------------------------
+
+function createOverlays()
+  local overlayTable = {}
+  overlayTable = {{ value = 0, label = "2-Pole" },{ value = 1, label = "4-Pole" }}
+    overlays.create(314, overlayTable)
+  overlayTable = {{ value = 0, label = "Drive" },{ value = 1, label = "Through" }}
+    overlays.create(324, overlayTable)
+  overlayTable = {{ value = 0, label = "Fast" },{ value = 1, label = "Slow" }}
+    overlays.create(325, overlayTable)
+  overlayTable = {{ value = 0, label = "Go" },{ value = 1, label = "Back" }}
+    overlays.create(326, overlayTable)
+  overlayTable = {{ value = 0, label = "Guitar In" },{ value = 1, label = "Effects In" }}
+    overlays.create(327, overlayTable)
+  overlayTable = {{ value = 0, label = "Hard" },{ value = 1, label = "Soft" }}
+    overlays.create(328, overlayTable)
+  overlayTable = {{ value = 0, label = "Mono" },{ value = 1, label = "P-P" }}
+    overlays.create(335, overlayTable)
+  overlayTable = {{ value = 0, label = "Mono" },{ value = 1, label = "Stereo" }}
+    overlays.create(336, overlayTable)
+  overlayTable = {{ value = 0, label = "Off" },{ value = 1, label = "On" }}
+    overlays.create(343, overlayTable)
+  overlayTable = {{ value = 0, label = "Open" },{ value = 1, label = "Close" }}
+    overlays.create(345, overlayTable)
+  overlayTable = {{ value = 0, label = "P-D" },{ value = 1, label = "D-P" }}
+    overlays.create(346, overlayTable)
+  overlayTable = {{ value = 0, label = "Short" },{ value = 1, label = "Long" }}
+    overlays.create(348, overlayTable)
+  overlayTable = {{ value = 0, label = "Slow" },{ value = 1, label = "Fast" }}
+    overlays.create(351, overlayTable)
+  overlayTable = {{ value = 0, label = "Up" },{ value = 1, label = "Down" }}
+    overlays.create(356, overlayTable)
+  overlayTable = {{ value = 0, label = "Vibrato" },{ value = 1, label = "Chorus" }}
+    overlays.create(358, overlayTable)
+  overlayTable =  {{ value = 0, label = "1/4" },{ value = 1, label = "dotted 1/8" },{ value = 2, label = "ping-pong" }}
+    overlays.create(308, overlayTable)
+  overlayTable =  {{ value = 0, label = "HPF" },{ value = 1, label = "BPF" },{ value = 2, label = "LPF" }}
+    overlays.create(330, overlayTable)
+  overlayTable =  {{ value = 0, label = "Serial" },{ value = 1, label = "Parallel" },{ value = 2, label = "Stereo" }}
+    overlays.create(347, overlayTable)
+  overlayTable =  {{ value = 0, label = "STBL" },{ value = 1, label = "CRTCL" },{ value = 2, label = "HZD" }}
+    overlays.create(353, overlayTable)
+  overlayTable =  {{ value = 0, label = "Up - Down" },{ value = 1, label = "Up" },{ value = 2, label = "Down" }}
+    overlays.create(357, overlayTable)
+  overlayTable =  {{ value = 0, label = "4 stage" },{ value = 1, label = "8 stage" },{ value = 2, label = "inv 4" },{ value = 3, label = "inv 8" }}
+    overlays.create(316, overlayTable)
+  overlayTable =  {{ value = 0, label = "HndGn" },{ value = 1, label = "Arm" },{ value = 2, label = "Bomb" },{ value = 3, label = "Thndr" }}
+    overlays.create(329, overlayTable)
+  overlayTable =  {{ value = 0, label = "Sine" },{ value = 1, label = "Triangle" },{ value = 2, label = "Saw Up" },{ value = 3, label = "Saw Down" }}
+    overlays.create(349, overlayTable)
+  overlayTable =  {{ value = 0, label = "Triangle" },{ value = 1, label = "Square" },{ value = 2, label = "Sine" },{ value = 3, label = "Ramp" },{ value = 4, label = "Saw" }}
+    overlays.create(354, overlayTable)
+  overlayTable =  {{ value = 0, label = "* 0.5" },{ value = 1, label = "* 1" },{ value = 2, label = "* 2" },{ value = 3, label = "* 4" },{ value = 4, label = "* 8" },{ value = 5, label = "* 16" }}
+    overlays.create(301, overlayTable)
+  overlayTable =  {{ value = 0, label = "Sine" },{ value = 1, label = "Triangle" },{ value = 2, label = "Peak" },{ value = 3, label = "Random" },{ value = 4, label = "Ramp" },{ value = 5, label = "Square" }}
+    overlays.create(350, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "1" },{ value = 2, label = "2" },{ value = 3, label = "3" },{ value = 4, label = "4" },{ value = 5, label = "5" },{ value = 6, label = "6" },{ value = 7, label = "7" },{ value = 8, label = "8" } }
+    overlays.create(340, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "1" },{ value = 2, label = "2" },{ value = 3, label = "3" },{ value = 4, label = "4" },{ value = 5, label = "5" },{ value = 6, label = "6" },{ value = 7, label = "7" },{ value = 8, label = "8" },{ value = 9, label = "9" },{ value = 10, label = "10" },{ value = 11, label = "11" },{ value = 12, label = "12" },{ value = 13, label = "13" },{ value = 14, label = "14" },{ value = 15, label = "15" },{ value = 16, label = "16" },{ value = 17, label = "17" },{ value = 18, label = "18" },{ value = 19, label = "19" },{ value = 20, label = "20" } }
+    overlays.create(339, overlayTable)
+  overlayTable = { { value = 0, label = "-6" },{ value = 1, label = "-5" },{ value = 2, label = "-4" },{ value = 3, label = "-3" },{ value = 4, label = "-m" },{ value = 5, label = "m" },{ value = 6, label = "3" },{ value = 7, label = "4" },{ value = 8, label = "5" },{ value = 9, label = "6" } }
+    overlays.create(317, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "60 Hz" },{ value = 2, label = "120 Hz" },{ value = 3, label = "180 Hz" },{ value = 4, label = "200 Hz" },{ value = 5, label = "280 Hz" },{ value = 6, label = "340 Hz" },{ value = 7, label = "400 Hz" },{ value = 8, label = "500 Hz" },{ value = 9, label = "630 Hz" },{ value = 10, label = "800 Hz" } }
+    overlays.create(344, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "20" },{ value = 2, label = "40" },{ value = 3, label = "60" },{ value = 4, label = "80" },{ value = 5, label = "100" },{ value = 6, label = "120" },{ value = 7, label = "140" },{ value = 8, label = "160" },{ value = 9, label = "180" },{ value = 10, label = "200" },{ value = 11, label = "230" },{ value = 12, label = "260" },{ value = 13, label = "300" },{ value = 14, label = "350" },{ value = 15, label = "400" },{ value = 16, label = "500" },{ value = 17, label = "600" },{ value = 18, label = "700" },{ value = 19, label = "800" },{ value = 20, label = "900" } }
+    overlays.create(341, overlayTable)
+  overlayTable = { { value = 0, label = "300 Hz" },{ value = 1, label = "400 Hz" },{ value = 2, label = "500 Hz" },{ value = 3, label = "600 Hz" },{ value = 4, label = "700 Hz" },{ value = 5, label = "800 Hz" },{ value = 6, label = "900 Hz" },{ value = 7, label = "1.0 kHz" },{ value = 8, label = "1.2 kHz" },{ value = 9, label = "1.5 kHz" } }
+    overlays.create(315, overlayTable)
+  overlayTable = { { value = 0, label = "80 Hz" },{ value = 1, label = "100 Hz" },{ value = 2, label = "125 Hz" },{ value = 3, label = "160 Hz" },{ value = 4, label = "200 Hz" },{ value = 5, label = "250 Hz" },{ value = 6, label = "315 Hz" },{ value = 7, label = "400 Hz" },{ value = 8, label = "500 Hz" },{ value = 9, label = "630 Hz" },{ value = 10, label = "800 Hz" },{ value = 11, label = "1.0 kHz" },{ value = 12, label = "1.3 kHz" },{ value = 13, label = "1.6 kHz" },{ value = 14, label = "2.0 kHz" },{ value = 15, label = "2.5 kHz" } }
+    overlays.create(318, overlayTable)
+  overlayTable = { { value = 0, label = "20 Hz" },{ value = 1, label = "25 Hz" },{ value = 2, label = "32 Hz" },{ value = 3, label = "40 Hz" },{ value = 4, label = "50 Hz" },{ value = 5, label = "63 Hz" },{ value = 6, label = "80 Hz" },{ value = 7, label = "100 Hz" },{ value = 8, label = "125 Hz" },{ value = 9, label = "160 Hz" },{ value = 10, label = "200 Hz" },{ value = 11, label = "250 Hz" },{ value = 12, label = "320 Hz" },{ value = 13, label = "400 Hz" },{ value = 14, label = "500 Hz" },{ value = 15, label = "630 Hz" },{ value = 16, label = "800 Hz" },{ value = 17, label = "1.0 kHz" },{ value = 18, label = "1.2 kHz" },{ value = 19, label = "1.6 kHz" },{ value = 20, label = "2.0 kHz" },{ value = 21, label = "2.5 kHz" },{ value = 22, label = "3.2 kHz" },{ value = 23, label = "4.0 kHz" },{ value = 24, label = "5.0 kHz" },{ value = 25, label = "6.3 kHz" },{ value = 26, label = "8.0 kHz" },{ value = 27, label = "10 kHz" },{ value = 28, label = "12 kHz" },{ value = 29, label = "16 kHz" },{ value = 30, label = "20 kHz" } }
+    overlays.create(313, overlayTable)
+  overlayTable = { { value = 0, label = "20 Hz" },{ value = 1, label = "25 Hz" },{ value = 2, label = "32 Hz" },{ value = 3, label = "40 Hz" },{ value = 4, label = "50 Hz" },{ value = 5, label = "63 Hz" },{ value = 6, label = "70 Hz" },{ value = 7, label = "80 Hz" },{ value = 8, label = "100 Hz" },{ value = 9, label = "120 Hz" },{ value = 10, label = "140 Hz" },{ value = 11, label = "150 Hz" },{ value = 12, label = "160 Hz" },{ value = 13, label = "180 Hz" },{ value = 14, label = "200 Hz" },{ value = 15, label = "250 Hz" },{ value = 16, label = "300 Hz" },{ value = 17, label = "350 Hz" },{ value = 18, label = "400 Hz" },{ value = 19, label = "450 Hz" },{ value = 20, label = "500 Hz" },{ value = 21, label = "630 Hz" },{ value = 22, label = "800 Hz" },{ value = 23, label = "1.0 kHz" },{ value = 24, label = "1.2 kHz" },{ value = 25, label = "1.6 kHz" },{ value = 26, label = "2.0 kHz" },{ value = 27, label = "2.5 kHz" },{ value = 28, label = "3.0 kHz" },{ value = 29, label = "3.6 kHz" },{ value = 30, label = "4.0 kHz" },{ value = 31, label = "4.5 kHz" },{ value = 32, label = "6.3 kHz" },{ value = 33, label = "8.0 kHz" },{ value = 34, label = "10 kHz" },{ value = 35, label = "12 kHz" },{ value = 36, label = "16 kHz" },{ value = 37, label = "20 kHz" } }
+    overlays.create(312, overlayTable)
+  overlayTable = { { value = 0, label = "C" },{ value = 1, label = "C#" },{ value = 2, label = "D" },{ value = 3, label = "D#" },{ value = 4, label = "E" },{ value = 5, label = "F" },{ value = 6, label = "F#" },{ value = 7, label = "G" },{ value = 8, label = "G#" },{ value = 9, label = "A" },{ value = 10, label = "A#" },{ value = 11, label = "B" } }
+    overlays.create(321, overlayTable)
+  overlayTable = { { value = 0, label = "1/128" },{ value = 1, label = "1/64" },{ value = 2, label = "1/32" },{ value = 3, label = "1/24" },{ value = 4, label = "1/12" },{ value = 5, label = "1/10" },{ value = 6, label = "1/9" },{ value = 7, label = "1/8" },{ value = 8, label = "1/7" },{ value = 9, label = "1/6" },{ value = 10, label = "1/5" },{ value = 11, label = "1/4" },{ value = 12, label = "1/3" },{ value = 13, label = "1/2" },{ value = 14, label = "1/1" } }
+    overlays.create(305, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "1/16" },{ value = 2, label = "1/12" },{ value = 3, label = "3/32" },{ value = 4, label = "1/8" },{ value = 5, label = "1/6" },{ value = 6, label = "3/16" },{ value = 7, label = "1/4" },{ value = 8, label = "3/8" },{ value = 9, label = "2/4" },{ value = 10, label = "3/4" },{ value = 11, label = "4/4" },{ value = 12, label = "5/4" },{ value = 13, label = "6/4" },{ value = 14, label = "7/4" },{ value = 15, label = "8/4" } }
+    overlays.create(338, overlayTable)
+  overlayTable = { { value = 0, label = "1/32" },{ value = 1, label = "1/24" },{ value = 2, label = "1/18" },{ value = 3, label = "1/16" },{ value = 4, label = "1/12" },{ value = 5, label = "1/10" },{ value = 6, label = "1/9" },{ value = 7, label = "1/8" },{ value = 8, label = "1/7" },{ value = 9, label = "1/6" },{ value = 10, label = "1/5" },{ value = 11, label = "1/4" },{ value = 12, label = "1/3" },{ value = 13, label = "1/2" },{ value = 14, label = "2/3" },{ value = 15, label = "3/4" },{ value = 16, label = "1/1" },{ value = 17, label = "4/3" },{ value = 18, label = "3/2" },{ value = 19, label = "2/1" },{ value = 20, label = "5/2" },{ value = 21, label = "3/1" },{ value = 22, label = "7/2" },{ value = 23, label = "4/1" },{ value = 24, label = "5/1" },{ value = 25, label = "6/1" },{ value = 26, label = "7/1" },{ value = 27, label = "8/1" },{ value = 28, label = "9/1" },{ value = 29, label = "10/1" },{ value = 30, label = "12/1" },{ value = 31, label = "16/1" },{ value = 32, label = "18/1" },{ value = 33, label = "24/1" },{ value = 34, label = "32/1" } }
+    overlays.create(306, overlayTable)
+  overlayTable = { { value = 0, label = "A9B0" },{ value = 1, label = "A9B1" },{ value = 2, label = "A9B2" },{ value = 3, label = "A9B3" },{ value = 4, label = "A9B4" },{ value = 5, label = "A9B5" },{ value = 6, label = "A9B6" },{ value = 7, label = "A9B7" },{ value = 8, label = "A9B8" },{ value = 9, label = "A9B9" },{ value = 10, label = "A8B9" },{ value = 11, label = "A7B9" },{ value = 12, label = "A6B9" },{ value = 13, label = "A5B9" },{ value = 14, label = "A4B9" },{ value = 15, label = "A3B9" },{ value = 16, label = "A2B9" },{ value = 17, label = "A1B9" },{ value = 18, label = "A0B9" } }
+    overlays.create(320, overlayTable)
+  overlayTable = { { value = 0, label = "A1B1" },{ value = 1, label = "A2B1" },{ value = 2, label = "A3B1" },{ value = 3, label = "A4B1" },{ value = 4, label = "A5B1" },{ value = 5, label = "A6B1" },{ value = 6, label = "A7B1" },{ value = 7, label = "A8B1" },{ value = 8, label = "A9B1" },{ value = 9, label = "A9B2" },{ value = 10, label = "A9B3" },{ value = 11, label = "A9B4" },{ value = 12, label = "A9B5" },{ value = 13, label = "A9B6" },{ value = 14, label = "A9B7" },{ value = 15, label = "A9B8" },{ value = 16, label = "A9B9" },{ value = 17, label = "A8B9" },{ value = 18, label = "A7B9" },{ value = 19, label = "A6B9" },{ value = 20, label = "A5B9" },{ value = 21, label = "A4B9" },{ value = 22, label = "A3B9" },{ value = 23, label = "A2B9" },{ value = 24, label = "A1B9" },{ value = 25, label = "A1B8" },{ value = 26, label = "A1B7" },{ value = 27, label = "A1B6" },{ value = 28, label = "A1B5" },{ value = 29, label = "A1B4" },{ value = 30, label = "A1B3" },{ value = 31, label = "A1B2" },{ value = 32, label = "A1B1" } }
+    overlays.create(319, overlayTable)
+  overlayTable = { { value = 0, label = "OFF" },{ value = 1, label = "D:1" },{ value = 2, label = "D:2" },{ value = 3, label = "D:3" },{ value = 4, label = "D:4" },{ value = 5, label = "D:5" },{ value = 6, label = "D:6" },{ value = 7, label = "D:7" },{ value = 8, label = "D:8" },{ value = 9, label = "D:9" },{ value = 10, label = "S:1" },{ value = 11, label = "S:2" },{ value = 12, label = "S:3" },{ value = 13, label = "S:4" },{ value = 14, label = "S:5" },{ value = 15, label = "S:6" },{ value = 16, label = "S:7" },{ value = 17, label = "S:8" },{ value = 18, label = "S:9" } }
+    overlays.create(342, overlayTable)
+  overlayTable = { { value = 0, label = "M 0" },{ value = 1, label = "M 1" },{ value = 2, label = "M 2" },{ value = 3, label = "M 3" },{ value = 4, label = "M 4" },{ value = 5, label = "M 5" },{ value = 6, label = "M 6" },{ value = 7, label = "M 7" },{ value = 8, label = "M 8" },{ value = 9, label = "M 9" },{ value = 10, label = "M 10" },{ value = 11, label = "S 0" },{ value = 12, label = "S 1" },{ value = 13, label = "S 2" },{ value = 14, label = "S 3" },{ value = 15, label = "S 4" },{ value = 16, label = "S 5" },{ value = 17, label = "S 6" },{ value = 18, label = "S 7" },{ value = 19, label = "S 8" },{ value = 20, label = "S 9" },{ value = 21, label = "S 10" } }
+    overlays.create(332, overlayTable)
+  overlayTable = { { value = 0, label = "- 1 Octave" },{ value = 1, label = "-11" },{ value = 2, label = "-10" },{ value = 3, label = "-9" },{ value = 4, label = "-8" },{ value = 5, label = "-7" },{ value = 6, label = "-6" },{ value = 7, label = "-5" },{ value = 8, label = "-4" },{ value = 9, label = "-3" },{ value = 10, label = "-2" },{ value = 11, label = "-1" },{ value = 12, label = "0" },{ value = 13, label = "1" },{ value = 14, label = "2" },{ value = 15, label = "3" },{ value = 16, label = "4" },{ value = 17, label = "5" },{ value = 18, label = "6" },{ value = 19, label = "7" },{ value = 20, label = "8" },{ value = 21, label = "9" },{ value = 22, label = "10" },{ value = 23, label = "11" },{ value = 24, label = "+ 1 Octave" },{ value = 25, label = "+2 Octaves" } }
+    overlays.create(310, overlayTable)
+  overlayTable = { { value = 0, label = "Up 0" },{ value = 1, label = "Up 1" },{ value = 2, label = "Up 2" },{ value = 3, label = "Up 3" },{ value = 4, label = "Up 4" },{ value = 5, label = "Up 5" },{ value = 6, label = "Up 6" },{ value = 7, label = "Up 7" },{ value = 8, label = "Up 8" },{ value = 9, label = "Up 9" },{ value = 10, label = "Down 0" },{ value = 11, label = "Down 1" },{ value = 12, label = "Down 2" },{ value = 13, label = "Down 3" },{ value = 14, label = "Down 4" },{ value = 15, label = "Down 5" },{ value = 16, label = "Down 6" },{ value = 17, label = "Down 7" },{ value = 18, label = "Down 8" },{ value = 19, label = "Down 9" },{ value = 20, label = "Triangle 0" },{ value = 21, label = "Triangle 1" },{ value = 22, label = "Triangle 2" },{ value = 23, label = "Triangle 3" },{ value = 24, label = "Triangle 4" },{ value = 25, label = "Triangle 5" },{ value = 26, label = "Triangle 6" },{ value = 27, label = "Triangle 7" },{ value = 28, label = "Triangle 8" },{ value = 29, label = "Triangle 9" } }
+    overlays.create(355, overlayTable)
+  overlayTable = { { value = 0, label = "- Oct" },{ value = 1, label = "- M7" },{ value = 2, label = "- m7" },{ value = 3, label = "- M6" },{ value = 4, label = "- m6" },{ value = 5, label = "- P5" },{ value = 6, label = "- Tri" },{ value = 7, label = "- P4" },{ value = 8, label = "- M3" },{ value = 9, label = "- m3" },{ value = 10, label = "- M2" },{ value = 11, label = "- m2" },{ value = 12, label = "- 50 c" },{ value = 13, label = "- 25 c" },{ value = 14, label = "Uni" },{ value = 15, label = "+ 25 c" },{ value = 16, label = "+ 50 c" },{ value = 17, label = "+ m2" },{ value = 18, label = "+ M2" },{ value = 19, label = "+ m3" },{ value = 20, label = "+ M3" },{ value = 21, label = "+ P4" },{ value = 22, label = "+ Tri" },{ value = 23, label = "+ P5" },{ value = 24, label = "+ m6" },{ value = 25, label = "+ M6" },{ value = 26, label = "+ m7" },{ value = 27, label = "+ M7" },{ value = 28, label = "+ Oct" },{ value = 29, label = "+ Oct + 5" },{ value = 30, label = "2 Oct" } }
+    overlays.create(337, overlayTable)
+  overlayTable = { { value = 1, label = "Unknown" },{ value = 6152, label = "Tremolo" },{ value = 6160, label = "Duo-Trem" },{ value = 6176, label = "Slicer" },{ value = 6192, label = "Phaser" },{ value = 6197, label = "Duo-Phase" },{ value = 6202, label = "Warp Phaser" },{ value = 6208, label = "The Vibe" },{ value = 6256, label = "Chorus" },{ value = 6264, label = "Bass Chorus" },{ value = 6272, label = "Detune" },{ value = 6280, label = "Bass Detune" },{ value = 6288, label = "Vintage CE" },{ value = 6304, label = "Stereo Chorus" },{ value = 6320, label = "Ensemble" },{ value = 6328, label = "Bass Ensemble" },{ value = 6352, label = "Super Chorus" },{ value = 6360, label = "Vin Flanger" },{ value = 6368, label = "Flanger" },{ value = 6376, label = "Bass Flanger" },{ value = 6384, label = "Dyna Flanger" },{ value = 6400, label = "Vibrato" },{ value = 6416, label = "Octave" },{ value = 6424, label = "Bass Octave" },{ value = 6432, label = "Pitch Shift" },{ value = 6448, label = "Mono Pitch" },{ value = 6456, label = "Bass Pitch" },{ value = 6464, label = "HPS" },{ value = 6480, label = "Bend Chorus" },{ value = 6496, label = "Mojo Roller" },{ value = 6512, label = "Ring Mod" },{ value = 6528, label = "CE-Cho5" },{ value = 6544, label = "Clone Chorus" },{ value = 6560, label = "Stone Phase" },{ value = 6576, label = "BF FLG 2" },{ value = 6592, label = "Silky Chorus" },{ value = 6608, label = "Mirage Chorus" },{ value = 6624, label = "Corona Chorus" },{ value = 6640, label = "ANA 234 Chorus" },{ value = 6656, label = "Corona Tri" },{ value = 7184, label = "Bit Crush" },{ value = 7200, label = "Bomber" },{ value = 7216, label = "Mono Synth" },{ value = 7232, label = "Z-Organ" },{ value = 7248, label = "Auto Pan" },{ value = 7264, label = "Roto Closet" },{ value = 8200, label = "Delay" },{ value = 8208, label = "Tape Echo" },{ value = 8224, label = "Mod Delay" },{ value = 8232, label = "Mod Delay 2" },{ value = 8240, label = "Analog Delay" },{ value = 8256, label = "Reverse Delay" },{ value = 8272, label = "Multi Tap Dly" },{ value = 8288, label = "Dyna Delay" },{ value = 8304, label = "Filter Delay" },{ value = 8320, label = "Pitch Delay" },{ value = 8336, label = "Stereo Delay" },{ value = 8352, label = "Phase Delay" },{ value = 8368, label = "TriggrHold Dly" },{ value = 8384, label = "Stomp Delay" },{ value = 8400, label = "Tape Echo 3" },{ value = 8416, label = "Dual Dig. Dly" },{ value = 8432, label = "Carbon Delay" },{ value = 8448, label = "Drive Echo" },{ value = 8464, label = "SlapBack Delay" },{ value = 8480, label = "Smooth Delay" },{ value = 8496, label = "LO-FI Delay" },{ value = 8512, label = "Slow Attck Dly" },{ value = 8528, label = "Tremolo Delay" },{ value = 8544, label = "Filter PP-Dly" },{ value = 8560, label = "Auto-Pan Delay" },{ value = 8576, label = "ICE Delay" },{ value = 9224, label = "HD Hall" },{ value = 9228, label = "HD Reverb" },{ value = 9232, label = "Hall" },{ value = 9248, label = "Room" },{ value = 9264, label = "Tiled Room" },{ value = 9280, label = "Spring" },{ value = 9296, label = "Arena Reverb" },{ value = 9312, label = "Early Reflect." },{ value = 9328, label = "Air" },{ value = 9360, label = "Plate" },{ value = 9376, label = "Mod Reverb" },{ value = 9392, label = "Slap Back Rvrb" },{ value = 9408, label = "Spring 63" },{ value = 9424, label = "Chamber" },{ value = 9440, label = "LO-FI Reverb" },{ value = 9456, label = "Church" },{ value = 9472, label = "Cave" },{ value = 9488, label = "Ambience" },{ value = 9504, label = "Gate Reverb" },{ value = 9520, label = "Reverse Reverb" },{ value = 9536, label = "Echo" },{ value = 9552, label = "Tremolo Reverb" },{ value = 9568, label = "Holy FLERB" },{ value = 9584, label = "Dynamic Reverb" },{ value = 9600, label = "Shimmer Reverb" },{ value = 9616, label = "Particle Rvrb" },{ value = 9632, label = "Space Hole" },{ value = 9648, label = "Mangled Space" },{ value = 9664, label = "Dual Reverb" },{ value = 1032, label = "Compressor" },{ value = 1040, label = "Rack Comp" },{ value = 1056, label = "M Compressor" },{ value = 1072, label = "Opt Compressor" },{ value = 1077, label = "160 Compressor" },{ value = 1082, label = "Limiter" },{ value = 1088, label = "Slow Attack" },{ value = 1104, label = "Zoom NR" },{ value = 1120, label = "Noise Gate" },{ value = 1136, label = "Dirty Gate" },{ value = 1152, label = "Orange Lim" },{ value = 1168, label = "Gray Comp" },{ value = 1184, label = "Dual Comp" },{ value = 2056, label = "Line Sel" },{ value = 2064, label = "Graphic EQ" },{ value = 2072, label = "Bass G.EQ" },{ value = 2080, label = "Para. EQ" },{ value = 2084, label = "Bass Para. EQ" },{ value = 2088, label = "Splitter" },{ value = 2092, label = "Bottom B" },{ value = 2096, label = "Exciter" },{ value = 2112, label = "Comb Filter" },{ value = 2128, label = "Auto Wah" },{ value = 2136, label = "Bass Auto Wah" },{ value = 2144, label = "Resonance" },{ value = 2160, label = "Cry" },{ value = 2176, label = "Slow Filter" },{ value = 2184, label = "Z Tron" },{ value = 2192, label = "M-Filter" },{ value = 2197, label = "A-Filter" },{ value = 2202, label = "Bass Cry" },{ value = 2208, label = "Step" },{ value = 2224, label = "Seq Filter" },{ value = 2240, label = "Random Filter" },{ value = 2256, label = "f Cycle" },{ value = 2272, label = "St. Guitar G.EQ" },{ value = 2304, label = "St. Bass G.EQ" },{ value = 0, label = "Thru" } }
+    overlays.create(399, overlayTable) -- special one for FX Types
+    local ctrlValue = controls.get (40):getValue ("")
+    ctrlValue:setOverlayId (399) 
+end
+createOverlays()
+
+-------------------------------------------------------- SELECT FX TYPE----------------------------------------------------------
+
+function selectFxType(valueObject,value,fxUnit)
+  fxUnit = fxUnit or 0 -- 0 means: comes from control 40 or 60 (manually)
+  local fxCat= {{0,"THRU"},{1,"DYNAMICS"},{2,"EQ / FILTER"},{6,"CHORUS"},{7,"VARIOUS"},{8,"DELAY"},{9,"REVERB"}}
+  local parameterNumber = valueObject:getMessage ():getParameterNumber ()
+  local fxTypeID = parameterMap.get (deviceId, PT_VIRTUAL,60)
+  print ("fxUnit = "..fxUnit)
+  if fxUnit == 99 then goto set6types end
+  if parameterNumber == 40 then -- keep fxType and fxTypeID in sync
+    fxTypeID = parameterMap.get (deviceId, PT_VIRTUAL,40) 
+    parameterMap.set (deviceId, PT_VIRTUAL, 60,fxTypeID)
+    parameterMap.set (deviceId, PT_VIRTUAL, 121+5-parameterMap.get (deviceId, PT_VIRTUAL,17),fxTypeID)
+  elseif parameterNumber == 60 then
+    parameterMap.set (deviceId, PT_VIRTUAL, 40,fxTypeID)
+    parameterMap.set (deviceId, PT_VIRTUAL, 121+5-parameterMap.get (deviceId, PT_VIRTUAL,17),fxTypeID)
+  end
+  if fxUnit < 6 then 
+    controls.get (138):setName (string.format("Variant %d",fxTypeID%16)) -- Variant Code
+    controls.get (137):setName (string.format("Main ID = %d",(fxTypeID>>4)%64)) -- Main ID
+    controls.get (128):setName ("...")
+    controls.get (136):setName ("...") -- Cat Name
+    --print(string.format("fxTypeID>>10 = %d", fxTypeID>>10))
+    else fxTypeID = value
+  end
+  for _, pair in ipairs(fxCat) do
+    if pair[1] == fxTypeID>>10 and fxUnit < 6 then
+      controls.get (128):setName (pair[2]) -- Cat Name
+      controls.get (136):setName (pair[2]) -- Cat Name
+    end 
+  end
+
+  :: set6types::
+  local fxTypeChar= {{1,"UNKNOWN","Param 1",ORANGE,0,4095,x,"Param 2",ORANGE,0,2047,x,"Param 3",ORANGE,0,2047,x,"Param 4",ORANGE,0,255,x,"Param 5",ORANGE,0,255,x,"Param 6",ORANGE,0,255,x,"Param 7",ORANGE,0,255,x,"Param 8",ORANGE,0,255,x,"Param 9",ORANGE,0,255,x},
+  {6152,"Tremolo","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Level",WHITE,0,150,x,"Wave",PURPLE,0,29,1055},
+  {6160,"Duo-Trem","Rate A (sync)",BLUE,0,78,10078,"Rate B (sync)",BLUE,0,78,10078,"Level",WHITE,0,150,x,"Depth A",PURPLE,0,100,x,"Depth B",PURPLE,0,100,x,"Link",PURPLE,0,2,1047,"Wave A",PURPLE,0,29,1055,"Wave B",PURPLE,0,29,1055},
+  {6176,"Slicer","Pattern",PURPLE,1,20,x,"Speed (sync)",BLUE,0,77,10077,"Balance",WHITE,0,100,x,"Threshold",PURPLE,0,50,x,"Level",WHITE,0,150,x},
+  {6192,"Phaser","Rate (sync)",BLUE,0,77,10077,"Color",PURPLE,0,3,1016,"Level",WHITE,0,150,x},
+  {6197,"Duo-Phase","Rate A (sync)",BLUE,0,77,10077,"Rate B",BLUE,0,51,10051,"Level",WHITE,0,150,x,"Reso A",PURPLE,0,10,x,"Reso B",PURPLE,0,10,x,"Link",PURPLE,0,2,1047,"Mod Depth A",PURPLE,1,100,x,"Mod Depth B",PURPLE,1,100,x},
+  {6202,"Warp Phaser","Speed (sync)",BLUE,0,77,10077,"Reso",PURPLE,0,10,x,"Level",WHITE,0,150,x,"Warp direction",0x8ABA7A,0,1,1026},
+  {6208,"The Vibe","Speed",BLUE,0,50,x,"Depth",PURPLE,0,100,x,"Bias",PURPLE,0,100,x,"Wave",PURPLE,0,100,x,"Mode",0x8ABA7A,0,1,1058,"Level",WHITE,0,150,x},
+  {6256,"Chorus","Depth",PURPLE,0,100,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6264,"Bass Chorus","Depth",PURPLE,0,100,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Low Cut",GREEN,0,10,1044,"Level",WHITE,0,150,x,"Pre-Delay",0x8ABA7A,0,1,1043},
+  {6272,"Detune","Cents",RED,-25,25,x,"Pre-Delay",BLUE,0,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6280,"Bass Detune","Cents",RED,-50,50,x,"Pre-Delay",BLUE,0,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x,"Low Cut",GREEN,0,10,1044},
+  {6288,"Vintage CE","Compressor",PURPLE,0,9,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {6304,"Stereo Chorus","Depth",PURPLE,0,100,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6320,"Ensemble","Depth",PURPLE,0,100,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6328,"Bass Ensemble","Depth",PURPLE,0,100,x,"Rate",BLUE,1,50,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6352,"Super Chorus","FX Level",WHITE,0,120,x,"Rate",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"EQ",PURPLE,0,100,x,"Mode",0x8ABA7A,0,1,1036},
+  {6360,"Vin Flanger","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Reso",PURPLE,-10,10,x,"Pre-Delay",BLUE,0,50,x,"Mix",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {6368,"Flanger","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Reso",PURPLE,-10,10,x,"Pre-Delay",BLUE,0,50,x,"Mix",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {6376,"Bass Flanger","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Reso",PURPLE,-10,10,x,"Pre-Delay",BLUE,0,50,x,"Mix",WHITE,0,100,x,"Level",WHITE,0,150,x,"Low Cut",GREEN,0,10,1044},
+  {6384,"Dyna Flanger","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Sense",PURPLE,-10,10,x,"Reso",PURPLE,-10,10,x,"Level",WHITE,0,150,x},
+  {6400,"Vibrato","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Balance",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6416,"Octave","Oct-1 Level",WHITE,0,100,x,"Oct-2 Level",WHITE,0,100,x,"Dry Level",WHITE,0,100,x,"Character",PURPLE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6424,"Bass Octave","Oct-1 Level",WHITE,0,100,x,"Dry Level",WHITE,0,100,x,"Tone",PURPLE,0,10,x,"Low Freq Level",GREEN,0,10,x,"Mid Freq Level",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6432,"Pitch Shift","Semitones",RED,0,25,1010,"Tone",GREEN,0,10,x,"Balance",WHITE,0,100,x,"Fine",RED,-25,25,x,"Level",WHITE,0,150,x},
+  {6448,"Mono Pitch","Semitones",RED,0,25,1010,"Tone",GREEN,0,10,x,"Balance",WHITE,0,100,x,"Fine",RED,-25,25,x,"Level",WHITE,0,150,x},
+  {6456,"Bass Pitch","Semitones",RED,0,25,1010,"Tone",GREEN,0,10,x,"Balance",WHITE,0,100,x,"Fine",RED,-25,25,x,"Level",WHITE,0,150,x},
+  {6464,"HPS","Scale",RED,0,9,1017,"Key",PURPLE,0,11,1021,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6480,"Bend Chorus","Depth",PURPLE,0,100,x,"Time",BLUE,0,50,x,"Balance",WHITE,0,100,x,"Mode",0x8ABA7A,0,1,1056,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {6496,"Mojo Roller","Depth",PURPLE,0,100,x,"Speed (sync)",BLUE,0,128,10128,"Rise",BLUE,0,100,x,"Mode",PURPLE,0,2,1057,"Level",WHITE,0,150,x},
+  {6512,"Ring Mod","Freq",BLUE,1,50,x,"Tone",GREEN,0,10,x,"Balance",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {6528,"CE-Cho5","FX Level",WHITE,0,120,x,"Rate",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"Low Freq Level",GREEN,0,100,x,"High Freq Lvl",GREEN,0,100,x,"Mode",0x8ABA7A,0,1,1036},
+  {6544,"Clone Chorus","Depth",PURPLE,1,2,x,"Rate",BLUE,0,100,x},
+  {6560,"Stone Phase","Depth",PURPLE,1,2,x,"Rate",BLUE,0,100,x},
+  {6576,"BF FLG 2","Delay Time",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"Rate",BLUE,0,100,x,"Res",PURPLE,0,100,x},
+  {6592,"Silky Chorus","Low Mix",WHITE,0,100,x,"High Mix",WHITE,0,100,x,"Chorus Mix",WHITE,0,100,x,"Low freq Mod",PURPLE,-25,25,x,"High freq Mod",PURPLE,-25,25,x,"Pre-Delay",BLUE,0,50,x,"Rate",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"Tone",GREEN,0,100,x},
+  {6608,"Mirage Chorus","Depth",PURPLE,0,100,x,"Rate",BLUE,0,100,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,20,x,"Tone",GREEN,0,100,x,"Level",WHITE,0,150,x},
+  {6624,"Corona Chorus","Speed",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"FX Level",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Dry",0x8ABA7A,0,1,1043},
+  {6640,"ANA 234 Chorus","Level",WHITE,0,100,x,"Rate",BLUE,0,100,x,"Depth",BLUE,0,100,x,"Low Freq Level",GREEN,0,100,x,"High Freq Lvl",GREEN,0,100,x,"Mode",0x8ABA7A,0,1,1036},
+  {6656,"Corona Tri","Speed",BLUE,0,100,x,"Depth",PURPLE,0,100,x,"FX Level",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Dry",0x8ABA7A,0,1,1043},
+  {7184,"Bit Crush","Bit depth",PURPLE,4,16,x,"Sample Rate",PURPLE,0,50,x,"Balance",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {7200,"Bomber","Pattern",PURPLE,0,3,1029,"Decay",BLUE,1,100,x,"Balance",WHITE,0,100,x,"Threshold",PURPLE,0,50,x,"Power",PURPLE,0,30,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {7216,"Mono Synth","Synth Level",WHITE,0,100,x,"Dry Level",WHITE,0,100,x,"Output Level",WHITE,0,150,x,"Wave",PURPLE,0,3,1049,"Tone",GREEN,0,10,x,"Speed",BLUE,0,100,x},
+  {7232,"Z-Organ","Upper freq",WHITE,0,100,x,"Lower freq",WHITE,0,100,x,"Dry",WHITE,0,100,x,"HPF",GREEN,0,10,x,"LPF",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {7248,"Auto Pan","Rate (sync)",BLUE,0,78,10078,"Width",PURPLE,0,100,10100,"Level",WHITE,0,150,x,"Depth",PURPLE,0,10,x,"Clip",PURPLE,0,10,x},
+  {7264,"Roto Closet","Balance",WHITE,0,100,x,"Mode",0x8ABA7A,0,1,1051,"Level",WHITE,0,150,x,"Drive",PURPLE,0,100,x},
+  {8200,"Delay","Time (sync)",BLUE,0,4022,14022,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"High Damping",GREEN,0,10,x,"Mono or P-P",0x8ABA7A,0,1,1035,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8208,"Tape Echo","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"High Damping",GREEN,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8224,"Mod Delay","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Rate",BLUE,1,50,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8232,"Mod Delay 2","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Rate",BLUE,1,50,x,"Level",WHITE,0,150,x,"Depth",PURPLE,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {8240,"Analog Delay","Time (sync)",BLUE,0,4022,14022,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"High Damping",GREEN,0,10,x,"Mono or P-P",0x8ABA7A,0,1,1035,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8256,"Reverse Delay","Time (sync)",BLUE,0,2005,12005,"Feedback",PURPLE,0,100,x,"Balance",WHITE,0,100,x,"High Damping",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {8272,"Multi Tap Dly","Time (sync)",BLUE,0,3018,13018,"Pattern",PURPLE,1,8,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {8288,"Dyna Delay","Time (sync)",BLUE,0,2014,12014,"Sense",PURPLE,-10,10,x,"Mix",WHITE,0,100,x,"Feedback",PURPLE,0,100,x,"Level",WHITE,0,150,x},
+  {8304,"Filter Delay","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Rate",BLUE,1,50,x,"Depth",PURPLE,0,100,x,"Reso",PURPLE,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8320,"Pitch Delay","Time",BLUE,1,2000,x,"Pitch",WHITE,-12,12,x,"Mix",WHITE,0,100,x,"Feedback",PURPLE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8336,"Stereo Delay","Time L (sync)",BLUE,0,2014,12014,"Time R (sync)",BLUE,0,2014,12014,"Mix",WHITE,0,100,x,"Left ch. Fdbk",WHITE,0,100,x,"Right ch. Fdbk",RED,0,100,x,"Level",WHITE,0,150,x,"Left Ch. Lvl",WHITE,0,100,x,"Right Ch. Lvl",RED,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {8352,"Phase Delay","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Rate",BLUE,1,50,x,"Color",PURPLE,0,3,1016,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8368,"TriggrHold Dly","Time",BLUE,10,1000,x,"Duty",BLUE,25,100,x,"Mix",WHITE,0,100,x,"Threshold",PURPLE,0,30,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {8384,"Stomp Delay","FX Level",WHITE,0,120,x,"Feedback",PURPLE,0,100,x,"Time",BLUE,1,600,x,"Sync",PURPLE,0,15,1038,"Mode",0x8ABA7A,0,1,1036,"Tail",0x8ABA7A,0,1,1043,"Hi Damping",GREEN,0,10,x},
+  {8400,"Tape Echo 3","Feedback",PURPLE,0,100,x,"FX Level",WHITE,0,100,x,"Time",BLUE,10,1000,x,"Recording Lvl",WHITE,0,100,x,"Sync",PURPLE,0,15,1038,"Pre-Amp",0x8ABA7A,0,1,1043},
+  {8416,"Dual Dig. Dly","Time A (sync)",BLUE,0,2005,12004,"Time B (sync)",BLUE,0,2005,12004,"Fdbk A",PURPLE,0,110,x,"Fdbk B",PURPLE,0,110,x,"Depth",PURPLE,0,101,10101,"Speed",BLUE,0,50,x,"Tone",GREEN,-100,100,x,"AB Delay Mix",WHITE,0,100,x,"Mix",WHITE,0,100,x},
+  {8432,"Carbon Delay","Time",BLUE,19,581,x,"Regen",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Modulation",0x8ABA7A,0,1,1043,"Width",PURPLE,0,50,x,"Speed",BLUE,0,50,x,"Tail",0x8ABA7A,0,1,1043,"Sync",PURPLE,0,15,1038},
+  {8448,"Drive Echo","Drive",PURPLE,0,100,x,"FX Level",WHITE,0,100,x,"Time (sync)",BLUE,0,1985,11985,"Feedback",PURPLE,0,100,x,"Wow & Flutter",PURPLE,0,100,x,"Dry affected",0x8ABA7A,0,1,1024,"Tail",0x8ABA7A,0,1,1043,"Mode",0x8ABA7A,0,1,1036},
+  {8464,"SlapBack Delay","Time (sync)",BLUE,1,300,10300,"SubDiv",PURPLE,0,2,1008,"Feedback",PURPLE,0,100,x,"Fx Level",WHITE,0,100,x,"Dry",0x8ABA7A,0,1,1043,"Tail",0x8ABA7A,0,1,1043,"Mode",0x8ABA7A,0,1,1036},
+  {8480,"Smooth Delay","Time (sync)",BLUE,0,3014,13018,"Feedback",PURPLE,0,100,x,"FX Level",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {8496,"LO-FI Delay","Time (sync)",BLUE,0,1913,11913,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Sampling Rate",PURPLE,0,14,1005,"Bit depth",PURPLE,4,32,x,"Blend",WHITE,0,100,x,"Damp",GREEN,0,10,x,"Filter",GREEN,0,8,1040,"Vinyl Noise",PURPLE,0,18,1042},
+  {8512,"Slow Attck Dly","Time (sync)",BLUE,1,1914,11914,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Depth",PURPLE,0,100,x,"Swell time",BLUE,1,50,x,"Mode",0x8ABA7A,0,1,1036,"Tail",0x8ABA7A,0,1,1043},
+  {8528,"Tremolo Delay","Time (sync)",BLUE,60,1855,11855,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"LFO Wave",PURPLE,0,4,1054,"Depth",PURPLE,0,100,x,"Speed",BLUE,0,34,1006,"Damp",GREEN,0,10,x,"HPF",GREEN,0,20,1041,"Grit",PURPLE,0,10,x},
+  {8544,"Filter PP-Dly","Time A (sync)",BLUE,0,1915,11915,"Time B (sync)",BLUE,0,1915,11915,"Mix",WHITE,0,100,x,"A-B Delay Mix",WHITE,0,100,x,"Feedback",PURPLE,0,110,x,"Slur",PURPLE,0,10,x,"Filter",GREEN,0,100,x,"Depth",PURPLE,0,21,1032,"Wave",PURPLE,0,47,10047},
+  {8560,"Auto-Pan Delay","Time (sync)",BLUE,0,2014,12014,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Rate",BLUE,0,52,10052,"Width",PURPLE,0,100,10100,"Depth",PURPLE,0,10,x,"Clip",PURPLE,0,10,x,"Link",0x8ABA7A,0,1,1046,"Level",WHITE,0,200,x},
+  {8576,"ICE Delay","Time (sync)",BLUE,0,1255,11255,"Feedback",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Interval",RED,0,30,1037,"Slice length",0x8ABA7A,0,1,1048,"Blend",WHITE,0,20,x,"Smear",PURPLE,0,20,1039,"Damp",GREEN,0,10,x,"HPF",GREEN,0,20,1041},
+  {9224,"HD Hall","Pre-Delay",BLUE,1,200,x,"Decay",BLUE,0,100,x,"Mix",WHITE,0,100,x,"Low Damping",GREEN,0,100,x,"Hi Damping",GREEN,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {9228,"HD Reverb","Decay",BLUE,0,100,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,0,200,x,"HPF",GREEN,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9232,"Hall","Decay",BLUE,1,30,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9248,"Room","Decay",BLUE,1,30,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9264,"Tiled Room","Decay",BLUE,1,30,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9280,"Spring","Decay",BLUE,1,30,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9296,"Arena Reverb","Decay",BLUE,1,30,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9312,"Early Reflect.","Decay",BLUE,1,30,x,"Shape",PURPLE,-10,10,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9328,"Air","Size",PURPLE,1,100,x,"Tone",GREEN,0,10,x,"Mix",WHITE,0,100,x,"Refection",PURPLE,0,10,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9360,"Plate","Pre-Delay",BLUE,1,200,x,"Decay",BLUE,0,100,x,"Mix",WHITE,0,100,x,"Color",PURPLE,0,100,x,"Low Damping",GREEN,0,100,x,"Hi Damping",GREEN,0,100,x,"Tail",0x8ABA7A,0,1,1043,"Level",WHITE,0,150,x},
+  {9376,"Mod Reverb","Depth",PURPLE,0,100,x,"Decay",BLUE,1,30,x,"Mix",WHITE,0,100,x,"Rate",BLUE,1,50,x,"Tone",GREEN,0,10,x,"Pre-Delay",BLUE,1,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9392,"Slap Back Rvrb","Time (sync)",BLUE,0,1010,11014,"Decay",BLUE,1,30,x,"Mix",WHITE,0,100,x,"Feedback",PURPLE,0,100,x,"Tone",GREEN,0,10,x,"Delay-Rvb bal.",WHITE,0,100,x,"Level",WHITE,0,150,x,"Tail",0x8ABA7A,0,1,1043},
+  {9408,"Spring 63","Dwell",WHITE,0,100,x,"Mixer",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Level",WHITE,0,150,x},
+  {9424,"Chamber","Decay",BLUE,0,100,x,"Tone",GREEN,0,100,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,0,200,x,"Tail",0x8ABA7A,0,1,1043},
+  {9440,"LO-FI Reverb","Decay",BLUE,0,100,x,"Tone",GREEN,0,100,x,"FX Level",WHITE,0,100,x,"Pre-Delay",0x8ABA7A,0,1,1048,"Tail",0x8ABA7A,0,1,1043,"Dry",0x8ABA7A,0,1,1043},
+  {9456,"Church","Decay",BLUE,0,100,x,"Pre-Delay",BLUE,0,200,x,"Mix",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Hi Damping",GREEN,0,100,x,"Tail",0x8ABA7A,0,1,1043,"Dry",0x8ABA7A,0,1,1043},
+  {9472,"Cave","Decay",BLUE,0,100,x,"Tone",GREEN,0,100,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,0,200,x,"Tail",0x8ABA7A,0,1,1043},
+  {9488,"Ambience","Decay",BLUE,0,100,x,"Tone",GREEN,0,100,x,"Mix",WHITE,0,100,x,"Pre-Delay",BLUE,0,200,x,"Tail",0x8ABA7A,0,1,1043,"Dry",0x8ABA7A,0,1,1043},
+  {9504,"Gate Reverb","Level",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Decay",BLUE,0,100,x,"Tail",0x8ABA7A,0,1,1043,"Dry",0x8ABA7A,0,1,1043},
+  {9520,"Reverse Reverb","Level",WHITE,0,100,x,"Tone",GREEN,0,100,x,"Decay",BLUE,0,100,x,"Tail",0x8ABA7A,0,1,1043,"Dry",0x8ABA7A,0,1,1043},
+  {9536,"Echo","Decay",BLUE,0,100,x,"Pre-Delay",BLUE,0,200,x,"Tone",GREEN,0,100,x,"Mix",WHITE,0,100,x,"Tail",0x8ABA7A,0,1,1043,"Mode",0x8ABA7A,0,1,1036},
+  {9552,"Tremolo Reverb","Decay",BLUE,0,100,x,"Pre-Delay",BLUE,0,500,x,"Mix",WHITE,0,100,x,"Speed (sync)",BLUE,0,218,10218,"Shape",PURPLE,0,5,1050,"Depth",PURPLE,0,199,10199,"Size",PURPLE,0,100,x,"Low",GREEN,-100,100,x,"High",GREEN,-100,100,x},
+  {9568,"Holy FLERB","Reverb",WHITE,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {9584,"Dynamic Reverb","Decay",BLUE,0,100,x,"Pre-Delay",BLUE,0,100,x,"Color",GREEN,0,100,x,"Sense",PURPLE,-100,100,x,"Mix",WHITE,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {9600,"Shimmer Reverb","Pre-Delay",BLUE,1,100,x,"Decay",BLUE,0,100,x,"Mix",WHITE,0,100,x,"Low Damping",GREEN,0,100,x,"Hi Damping",GREEN,0,100,x,"Tail",0x8ABA7A,0,1,1043},
+  {9616,"Particle Rvrb","Dwell",BLUE,0,100,x,"Gain",WHITE,0,100,x,"Mode",PURPLE,0,2,1053,"Mix",WHITE,0,100,x,"Mono",0x8ABA7A,0,1,1043,"Tail",0x8ABA7A,0,1,1043},
+  {9632,"Space Hole","Decay",BLUE,-100,100,x,"Pre-Delay",BLUE,0,1000,x,"Mix",WHITE,0,100,x,"Feedback",PURPLE,0,100,x,"Depth",PURPLE,0,100,x,"Speed",BLUE,0,100,x,"Size",PURPLE,0,100,x,"Low",GREEN,-100,100,x,"High",GREEN,-100,100,x},
+  {9648,"Mangled Space","Pre-Delay",BLUE,0,500,x,"Clip",PURPLE,0,100,x,"Mix",WHITE,0,100,x,"Decay",PURPLE,0,100,x,"Mod",PURPLE,0,100,x,"Size",PURPLE,0,100,x,"Low",GREEN,-100,100,x,"High",GREEN,-100,100,x,"Level",WHITE,0,200,x},
+  {9664,"Dual Reverb","Pre-Delay A",BLUE,0,750,x,"Pre-Delay B",BLUE,0,750,x,"Mix",WHITE,0,100,x,"AB Mix",WHITE,0,18,1020,"Decay A",BLUE,0,100,x,"Decay B",BLUE,0,100,x,"Size",PURPLE,0,32,1019,"Tone A",GREEN,-100,100,x,"Tone B",GREEN,-100,100,x},
+  {1032,"Compressor","Sense",PURPLE,0,10,x,"Tone",GREEN,0,10,x,"Level",WHITE,0,150,x,"Attack",0x8ABA7A,0,1,1051},
+  {1040,"Rack Comp","Threshold",PURPLE,0,50,x,"Ratio",PURPLE,1,10,x,"Level",WHITE,0,150,x,"Attack",PURPLE,1,10,x},
+  {1056,"M Compressor","Threshold",PURPLE,0,50,x,"Ratio",PURPLE,1,10,x,"Level",WHITE,0,150,x,"Attack",PURPLE,1,10,x},
+  {1072,"Opt Compressor","Drive",PURPLE,0,10,x,"Tone",GREEN,0,100,x,"Level",WHITE,0,150,x},
+  {1077,"160 Compressor","Threshold",PURPLE,-60,0,x,"Ratio",PURPLE,0,90,10090,"Gain",WHITE,0,20,x,"Knee",0x8ABA7A,0,1,1028,"Level",WHITE,0,150,x},
+  {1082,"Limiter","Threshold",PURPLE,0,50,x,"Ratio",PURPLE,1,10,x,"Level",WHITE,0,150,x,"Release",PURPLE,1,10,x},
+  {1088,"Slow Attack","Time",PURPLE,1,50,x,"Curve",PURPLE,0,10,x,"Level",WHITE,0,150,x},
+  {1104,"Zoom NR","Threshold",PURPLE,1,25,x,"Dectection Lvl",0x8ABA7A,0,1,1027,"Level",WHITE,0,150,x},
+  {1120,"Noise Gate","Threshold",PURPLE,1,25,x,"Level",WHITE,0,150,x},{1136,"Dirty Gate","Threshold",PURPLE,1,25,x,"Level",WHITE,0,150,x},
+  {1152,"Orange Lim",},
+  {1168,"Gray Comp","Sustain",PURPLE,0,100,x,"Output Level",WHITE,0,100,x},
+  {1184,"Dual Comp","High comp dpth",PURPLE,0,50,x,"Low comp depth",PURPLE,0,50,x,"Freq",GREEN,0,9,1015,"Level",WHITE,0,150,x,"Tone",GREEN,0,10,x},
+  {2056,"Line Sel","To next FX",WHITE,0,150,x,"Direct Out",WHITE,0,150,x},
+  {2064,"Graphic EQ","160Hz",GREEN,-12,12,x,"400Hz",GREEN,-12,12,x,"800Hz",GREEN,-12,12,x,"3.2kHz",GREEN,-12,12,x,"6.4kHz",GREEN,-12,12,x,"12kHz",GREEN,-12,12,x,"Level",WHITE,0,150,x},
+  {2072,"Bass G.EQ","50Hz",GREEN,-12,12,x,"120Hz",GREEN,-12,12,x,"400Hz",GREEN,-12,12,x,"500Hz",GREEN,-12,12,x,"800Hz",GREEN,-12,12,x,"4.5kHz",GREEN,-12,12,x,"10kHz",GREEN,-12,12,x,"Level",WHITE,0,150,x},
+  {2080,"Para. EQ","Freq1",GREEN,0,30,1013,"Q1",GREEN,0,5,1001,"Gain1",WHITE,-12,12,x,"Freq2",GREEN,0,30,1013,"Q2",GREEN,0,5,1001,"Gain2",WHITE,-12,12,x,"Level",WHITE,0,150,x},
+  {2084,"Bass Para. EQ","Freq1",GREEN,0,37,1012,"Q1",GREEN,0,5,1001,"Gain1",WHITE,-20,20,x,"Freq2",GREEN,0,37,1012,"Q2",GREEN,0,5,1001,"Gain2",WHITE,-20,20,x,"Level",WHITE,0,150,x},
+  {2088,"Splitter","Hi",WHITE,0,100,x,"Lo",WHITE,0,100,x,"Freq",GREEN,0,15,1018,"Level",WHITE,0,150,x},
+  {2092,"Bottom B","Bass",GREEN,0,10,x,"Treble",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {2096,"Exciter","Bass PhaseCorr",PURPLE,0,100,x,"Treble PhseCrr",PURPLE,0,100,x,"Level",WHITE,0,150,x},
+  {2112,"Comb Filter","Freq",GREEN,1,50,x,"Reso",PURPLE,-10,10,x,"Mix",WHITE,0,100,x,"High Damping",GREEN,0,10,x,"Level",WHITE,0,150,x},
+  {2128,"Auto Wah","Sense",PURPLE,-10,10,x,"Reso",PURPLE,0,10,x,"Level",WHITE,0,150,x},
+  {2136,"Bass Auto Wah","Sense",PURPLE,-10,10,x,"Reso",PURPLE,0,10,x,"Dry",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2144,"Resonance","Sense",PURPLE,-10,10,x,"Reso",PURPLE,0,10,x,"Level",WHITE,0,0,x},
+  {2160,"Cry","Range",PURPLE,1,10,x,"Reso",PURPLE,0,10,x,"Sense",PURPLE,-10,10,x,"Balance",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2176,"Slow Filter","Time",BLUE,1,50,x,"Curve",PURPLE,0,10,x,"Level",WHITE,0,150,x,"Reso",PURPLE,0,10,x,"Character",0x8ABA7A,0,1,1014,"Direction",0x8ABA7A,0,1,1045},
+  {2184,"Z Tron","Sense",PURPLE,-10,10,x,"Reso",PURPLE,0,10,x,"Dry",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2192,"M-Filter","Freq",GREEN,0,100,x,"Sense",PURPLE,0,10,x,"Reso",PURPLE,0,10,x,"Type",PURPLE,0,2,1030,"Character",0x8ABA7A,0,1,1014,"Velocity",0x8ABA7A,0,1,1025,"Balance",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2197,"A-Filter","Sense",PURPLE,1,10,x,"Peak",PURPLE,0,10,x,"Mode",0x8ABA7A,0,1,1056,"Dry",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2202,"Bass Cry","Range",GREEN,1,10,x,"Reso",PURPLE,0,10,x,"Sense",PURPLE,-10,10,x,"Balance",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2208,"Step","Depth",PURPLE,0,100,x,"Rate (sync)",BLUE,0,78,10078,"Reso",PURPLE,0,10,x,"Shape",PURPLE,0,10,x,"Level",WHITE,0,150,x},
+  {2224,"Seq Filter","Step",PURPLE,2,8,x,"Pattern",PURPLE,1,8,x,"Speed (sync)",BLUE,0,77,10077,"Shape",PURPLE,0,10,x,"Reso",PURPLE,0,10,x,"Level",WHITE,0,150,x},
+  {2240,"Random Filter","Speed (sync)",BLUE,0,77,10077,"Range",PURPLE,0,100,x,"Reso",PURPLE,0,10,x,"Type",PURPLE,0,2,1030,"Character",0x8ABA7A,0,1,1014,"Balance",WHITE,0,100,x,"Level",WHITE,0,150,x},
+  {2256,"f Cycle","Rate (sync)",BLUE,0,77,10077,"Wave",PURPLE,0,3,1049,"Level",WHITE,0,150,x,"Depth",PURPLE,0,100,x,"Reso",PURPLE,0,10,x},
+  {2272,"St.Guitar G.EQ","160Hz",GREEN,-12,12,x,"400Hz",GREEN,-12,12,x,"800Hz",GREEN,-12,12,x,"3.2kHz",GREEN,-12,12,x,"6.4kHz",GREEN,-12,12,x,"12kHz",GREEN,-12,12,x,"Level",WHITE,0,150,x},
+  {2304,"St.Bass G.EQ","50Hz",GREEN,-12,12,x,"120Hz",GREEN,-12,12,x,"400Hz",GREEN,-12,12,x,"500Hz",GREEN,-12,12,x,"800Hz",GREEN,-12,12,x,"4.5kHz",GREEN,-12,12,x,"10kHz",GREEN,-12,12,x,"Level",WHITE,0,150,x},
+  {0,"Thru"}}
+
+  if fxUnit >= 120 then
+    local control = controls.get (fxUnit-91) -- controls to reach are 30..35
+    control:setName ("Unknown")      
+    for _, pair in ipairs(fxTypeChar) do
+      if pair[1] == fxTypeID then 
+        control:setName (pair[2])
+        return
+      end
+    end
+    return
+  elseif fxUnit == 99 then
+
+    for i = 0,5 do
+      local control = controls.get (30+i) -- controls to reach are 30..35     
+      control:setName ("Unknown")
+      fxTypeID = parameterMap.get (deviceId, PT_VIRTUAL,121+i)
+      for _, pair in ipairs(fxTypeChar) do
+        if pair[1] == fxTypeID then 
+          control:setName (pair[2])
+         return
+        end
+      end
+    end
+    return
+  end
+
+  local fxTypeFound = 0 -- check if effect type exists : if not we'll use the non-existant fxTypeID = 1
+  for _, pair in ipairs(fxTypeChar) do
+    if pair[1] == fxTypeID then fxTypeFound = 1 end
+  end
+  if fxTypeFound == 0 then fxTypeID = 1 end
+
+  local control = controls.get (15)
+  local ctrlValue = control:getValue ("")
+  local message = ctrlValue:getMessage ()
+
+  for _, pair in ipairs(fxTypeChar) do
+    if pair[1] == fxTypeID then
+      control:setName (pair[2])
+      for i = 0,8 do
+        if pair[3+i*5] == nil then
+          for j = i,8 do
+            control = controls.get (20+j)
+            control:setVisible (false)        
+          end
+          return
+        end
+        control = controls.get (20+i)
+        control:setVisible (true)
+        control:setName (pair[3 + i*5]) 
+        control:setColor(pair[4 + i*5])
+        ctrlValue = control:getValue ("")
+        ctrlValue:setMin (pair[5 + i*5]) -- set min display value
+        ctrlValue:setMax (pair[6 + i*5])
+        if pair[6 + i*5] < parameterMap.get (deviceId, PT_VIRTUAL,20+i) then
+          control:setColor(ORANGE)
+        end
+        message = ctrlValue:getMessage () 
+        message:setMax (pair[6 + i*5] - pair[5 + i*5]) -- set max MIDI value
+        --print ("line 645 : pair[7+i*5] < 10000 : "..pair[7+i*5].." , i = "..i)
+        if pair[7+i*5] < 10000 then 
+          ctrlValue:setOverlayId (pair[7+i*5]-700) -- originally planned to use overlayId above 1000, but there seem to be a cap. So the range has been reduced to Id's between 301 and 358 
+          formatToApply[i] = 0
+        else
+          ctrlValue:setOverlayId (0)
+          formatToApply[i] = pair[7+i*5]
+        end
+      end
+      return
+    end
+  end
+end
+
+----------------------------------------------------- sysEx constructor -------------------------------------------------
+
+local target = {} -- Target block 122 bytes, of 8 bits each. 6 groups of 18 bytes per FX, 3 bytes patch settings, 10 name bytes, 1 blank
+for i = 1, 122 do
+    target[i] = 0
+end
+
+function set_bit(byte, bit_pos, value) -- Helper function to set a specific bit in a byte
+    if value == 1 then
+        return byte | (1 << bit_pos)
+    else
+        return byte & ~(1 << bit_pos)
+    end
+end
+
+function get_bit(value, bit_pos) -- Helper function to get a specific bit from a value
+    return (value >> bit_pos) & 1
+end
+
+function map_bits(source_value, num_bits, shiftByte, bit_mappings) -- Helper function to place bits into target bytes
+    for i = 0, num_bits - 1 do
+        local bit_value = get_bit(source_value, i)
+        local mapping = bit_mappings[i + 1]
+        target[shiftByte+mapping.byte] = set_bit(target[shiftByte+mapping.byte], mapping.bit, bit_value)
+    end
+end
+
+function resetColors()
+  controls.get(41):setVisible(false)
+  controls.get(43):setVisible(false)
+  local fxUnit = 5 - parameterMap.get (deviceId, PT_VIRTUAL,17)
+  for i = 3,5 do
+    if i == fxUnit then 
+      controls.get (i+30):setColor(0x8ABA7A) 
+    else
+      controls.get (i+30):setColor(BLUE) -- on/off buttons
+    end
+  end
+  controls.get(18):setColor(BLUE)
+  controls.get(14):setColor(BLUE)
+  controls.get(40):setColor(0x8ABA7A)
+  controls.get(60):setColor(0x8ABA7A)
+  for i = 2,11 do
+    controls.get(i):setColor(BLUE)
+  end
+end
+
+function xmitSysExPreset(valueObject,value)
+  if value == 0 then return end
+  resetColors()
+  selectFxType(valueObject,value,99)
+  for j = 0,5 do -- fill bytes 1- 108 with fx Unit data
+    local EfOn = parameterMap.get (deviceId, PT_VIRTUAL, 30 + j)     -- EfOn: 1 bit -> byte 1 bit 0
+    local fxTypeID = parameterMap.get (deviceId, PT_VIRTUAL, 121 + j) -- fxTypeID: 14 bits -> byte 1 bits 1-7, byte 2 bits 0-2, byte 4 bits 1-4
+    local Op0 = parameterMap.get (deviceId, PT_VIRTUAL, 61 + j*9) -- Op0: 12 bits -> byte 4 bits 5-7, byte 5 bits 0-7, byte 6 bit 0
+    local Op1 = parameterMap.get (deviceId, PT_VIRTUAL, 62 + j*9) -- Op1: 11 bits -> byte 6 bits 2-7, byte 7 bits 0-4
+    local Op2 = parameterMap.get (deviceId, PT_VIRTUAL, 63 + j*9) -- Op2: 11 bits -> byte 7 bit 7, byte 8 bits 0-7, byte 9 bits 0-1
+    local Op3 = parameterMap.get (deviceId, PT_VIRTUAL, 64 + j*9) -- Op3: 8 bits -> byte 9 bits 4-7, byte 10 bits 0-3
+    local Op4 = parameterMap.get (deviceId, PT_VIRTUAL, 65 + j*9) -- Op4: 8 bits -> byte 10 bits 4-7, byte 11 bits 0-3
+    local Op5 = parameterMap.get (deviceId, PT_VIRTUAL, 66 + j*9) -- Op5: 8 bits -> byte 11 bits 4-7, byte 12 bits 0-3
+    local Op6 = parameterMap.get (deviceId, PT_VIRTUAL, 67 + j*9) -- Op6: 8 bits -> byte 12 bits 4-7, byte 13 bits 0-3
+    local Op7 = parameterMap.get (deviceId, PT_VIRTUAL, 68 + j*9) -- Op7: 8 bits -> byte 13 bits 4-7, byte 14 bits 0-3
+    local Op8 = parameterMap.get (deviceId, PT_VIRTUAL, 69 + j*9) -- Op8: 8 bits -> byte 17 bits 0-7
+    map_bits(EfOn, 1, j*18, {
+      {byte = 1, bit = 0}
+    })
+    map_bits(fxTypeID, 14, j*18, {
+      {byte = 1, bit = 1}, {byte = 1, bit = 2}, {byte = 1, bit = 3}, {byte = 1, bit = 4}, {byte = 1, bit = 5}, {byte = 1, bit = 6}, {byte = 1, bit = 7},
+      {byte = 2, bit = 0}, {byte = 2, bit = 1}, {byte = 2, bit = 2},
+      {byte = 4, bit = 1}, {byte = 4, bit = 2}, {byte = 4, bit = 3}, {byte = 4, bit = 4}
+    })
+   map_bits(Op0, 12, j*18, {
+      {byte = 4, bit = 5}, {byte = 4, bit = 6}, {byte = 4, bit = 7},
+      {byte = 5, bit = 0}, {byte = 5, bit = 1}, {byte = 5, bit = 2}, {byte = 5, bit = 3}, {byte = 5, bit = 4}, {byte = 5, bit = 5}, {byte = 5, bit = 6}, {byte = 5, bit = 7},
+      {byte = 6, bit = 0}
+    })  
+    map_bits(Op1, 11, j*18, {
+      {byte = 6, bit = 2}, {byte = 6, bit = 3}, {byte = 6, bit = 4}, {byte = 6, bit = 5}, {byte = 6, bit = 6}, {byte = 6, bit = 7},
+      {byte = 7, bit = 0}, {byte = 7, bit = 1}, {byte = 7, bit = 2}, {byte = 7, bit = 3}, {byte = 7, bit = 4}
+    })
+    map_bits(Op2, 11, j*18, {
+      {byte = 7, bit = 7},
+      {byte = 8, bit = 0}, {byte = 8, bit = 1}, {byte = 8, bit = 2}, {byte = 8, bit = 3}, {byte = 8, bit = 4}, {byte = 8, bit = 5}, {byte = 8, bit = 6}, {byte = 8, bit = 7},
+     {byte = 9, bit = 0}, {byte = 9, bit = 1}
+    }) 
+    map_bits(Op3, 8, j*18, {
+      {byte = 9, bit = 4}, {byte = 9, bit = 5}, {byte = 9, bit = 6}, {byte = 9, bit = 7},
+      {byte = 10, bit = 0}, {byte = 10, bit = 1}, {byte = 10, bit = 2}, {byte = 10, bit = 3}
+    })
+    map_bits(Op4, 8, j*18, {
+      {byte = 10, bit = 4}, {byte = 10, bit = 5}, {byte = 10, bit = 6}, {byte = 10, bit = 7},
+      {byte = 11, bit = 0}, {byte = 11, bit = 1}, {byte = 11, bit = 2}, {byte = 11, bit = 3}
+    })
+    map_bits(Op5, 8, j*18, {
+      {byte = 11, bit = 4}, {byte = 11, bit = 5}, {byte = 11, bit = 6}, {byte = 11, bit = 7},
+      {byte = 12, bit = 0}, {byte = 12, bit = 1}, {byte = 12, bit = 2}, {byte = 12, bit = 3}
+    })
+    map_bits(Op6, 8, j*18, {
+      {byte = 12, bit = 4}, {byte = 12, bit = 5}, {byte = 12, bit = 6}, {byte = 12, bit = 7},
+      {byte = 13, bit = 0}, {byte = 13, bit = 1}, {byte = 13, bit = 2}, {byte = 13, bit = 3}
+    })
+    map_bits(Op7, 8, j*18, {
+      {byte = 13, bit = 4}, {byte = 13, bit = 5}, {byte = 13, bit = 6}, {byte = 13, bit = 7},
+      {byte = 14, bit = 0}, {byte = 14, bit = 1}, {byte = 14, bit = 2}, {byte = 14, bit = 3}
+    })
+    map_bits(Op8, 8, j*18, {
+      {byte = 17, bit = 0}, {byte = 17, bit = 1}, {byte = 17, bit = 2}, {byte = 17, bit = 3}, {byte = 17, bit = 4}, {byte = 17, bit = 5}, {byte = 17, bit = 6}, {byte = 17, bit = 7}
+    })
+  end
+  -- fill bytes 109- 111 with patch settings data
+      local dspFull  = parameterMap.get (deviceId, PT_VIRTUAL, 57) -- dspFull: 6 bits -> byte 109 bits 0-5
+      local focusFx  = parameterMap.get (deviceId, PT_VIRTUAL, 17) -- focusFx: 3 bits -> byte 109 bits 6-7, byte 110 bit 0
+      local maxFxNum = parameterMap.get (deviceId, PT_VIRTUAL, 14) -- maxFxNum: 3 bits -> byte 110 bits 2-4
+      local tapTempo = parameterMap.get (deviceId, PT_VIRTUAL, 18) -- tapTempo: 8 bits -> byte 110 bits 5-7, byte 111 bits 0-4 
+  map_bits(dspFull, 6, 0, {
+    {byte = 109, bit = 0}, {byte = 109, bit = 1}, {byte = 109, bit = 2}, {byte = 109, bit = 3}, {byte = 109, bit = 4}, {byte = 109, bit = 5}
+  })   
+  map_bits(focusFx, 3, 0, {
+    {byte = 109, bit = 6}, {byte = 109, bit = 7}, {byte = 110, bit = 0}
+  }) 
+  map_bits(maxFxNum, 3, 0, {
+    {byte = 110, bit = 2}, {byte = 110, bit = 3}, {byte = 110, bit = 4}
+  })  
+  map_bits(tapTempo, 8, 0, {
+    {byte = 110, bit = 5}, {byte = 110, bit = 6}, {byte = 110, bit = 7},
+    {byte = 111, bit = 0}, {byte = 111, bit = 1}, {byte = 111, bit = 2}, {byte = 111, bit = 3}, {byte = 111, bit = 4}
+  })
+  -- fill bytes 112- 121 with name data
+  for j = 0,9 do
+    local nameChar = parameterMap.get (deviceId, PT_VIRTUAL, 2 + j) -- nameChar: 7 bits -> byte 112+j bits 0-7 
+    map_bits(nameChar, 7, 112+j, {
+      {byte = 0, bit = 0}, {byte = 0, bit = 1}, {byte = 0, bit = 2}, {byte = 0, bit = 3}, {byte = 0, bit = 4}, {byte = 0, bit = 5}, {byte = 0, bit = 6}
+    })
+  end
+  --for i = 1, #target do -- Print the target bytes in hexadecimal for verification
+  --  print(string.format("Target 8bit byte %d: %02X", i, target[i]))
+  --end
+  local outputSysEx = {} -- output block 144 bytes, of 7 bits each.
+  for i = 1, 144 do
+    outputSysEx[i] = 0
+  end
+  outputSysEx[1]=0x52 -- zoom Manufacturer ID : use 0x31 -- Viscount ID for testing purposes
+  outputSysEx[2]=zoomDeviceID
+  outputSysEx[3]=zoomModelID
+  outputSysEx[4]=0x28
+  for j = 0,17 do
+    for i = 0, 6 do -- Construct the first byte (bits 6 to 0 contain the 8th bits of 7 target bytes), the 7 subsequent bytescontain the 6 least significant bits of the corresponding target Byte
+      local bitValue = 0
+      if j*7 + i + 1 <= 122 then
+        bitValue = (target[j*7 + i + 1] >> 7) & 1  -- Extract the 8th bit
+      end
+      outputSysEx[j*8 + 5] = outputSysEx[j*8 + 5] | (bitValue << (6 - i))  -- Place it in the corresponding bit in byte 1
+     if j*8 + i + 6 <= 143 then 
+        outputSysEx[j*8 + i + 6] = target[j*7 + i + 1] & 0x7F -- 0x7F = 01111111, keeps the 7 least significant bits
+      end 
+    end
+  end
+  midi.sendSysex (devPort, outputSysEx)
+end
+
+-------------------------------------------------------- PATCH REQUESTS ---------------------------------------------------------
+
+function patchSelect(valueObject, value) ---- selects a patch and requests its SysEx patch settings
+  if value==0 then return end
+  resetColors()
+  if editMode == 0 then
+    midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x50}) -- requests edit mode
+    editMode = 1
+    parameterMap.set (deviceId, PT_SYSEX,12,80)
+  end
+  local ctlId = valueObject:getControl():getId() -- ref id
+  local currentPage = pages.getActive():getId()
+  if not(
+    ((currentPage ==  1) and ((ctlId == 228) or (ctlId == 229) or (ctlId == 230))) or 
+    ((currentPage == 2) and ((ctlId == 49) or (ctlId == 50) or (ctlId == 51)))
+    )
+    then return
+  end
+  info.setText(authorDate)
+  control= controls.get (229)
+  control:setName ("...")
+  control= controls.get (50)
+  control:setName ("...")
+  local messageValue = valueObject:getMessage ():getValue ()
+  local bankNum = 0 --parameterMap.get (deviceId, PT_VIRTUAL, 1002)
+  local bankMax ={50}
+  local progNum = parameterMap.get (deviceId, PT_VIRTUAL, 1003) + messageValue - 2
+  if progNum >= bankMax[bankNum+1] then progNum= 0 end
+  if progNum == -1   then progNum=bankMax[bankNum+1]-1 end
+  parameterMap.set (deviceId, PT_VIRTUAL, 1003,51-progNum)
+  parameterMap.set (deviceId, PT_VIRTUAL, 1003,progNum)-- ensures formatting is applied on page  6 program Number control
+  patchNumber = progNum
+  --midi.sendControlChange(devPort , devChannel , 32, 0)
+  midi.sendProgramChange(devPort , devChannel , progNum)
+  --print (string.format("Requesting patch: Bank = %d, Prog = %d", bankNum, progNum))
+  midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x29}) 
+end
+
+function savePatch(valueObject,value) ----
+  if value==1 then 
+    controls.get (132):setVisible (true)
+    controls.get (133):setVisible (true)
+  else 
+    controls.get (131):setName("SAVE PATCH")
+    controls.get (132):setVisible (false)
+    controls.get (133):setVisible (false) 
+  end
+end
+
+function discardPatch(valueObject,value) ----
+  parameterMap.set (deviceId, PT_VIRTUAL, 131,0)
+  controls.get (132):setVisible (false)
+  controls.get (133):setVisible (false)
+end
+
+function surePatch(valueObject,value) ----
+if value== 0 then return end
+  local progNum = parameterMap.get (deviceId, PT_VIRTUAL, 130)
+  midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x32, 0x01, 0x00, 0x00,progNum, 0x00, 0x00, 0x00, 0x00, 0x00})
+  controls.get (131):setName("Saved !")
+  controls.get (132):setVisible (false)
+  controls.get (133):setVisible (false)
+end
+
+midi.sendSysex (devPort, {0x52,zoomDeviceID, zoomModelID, 0x50}) -- requests edit mode
+editMode = 1
+parameterMap.set (deviceId, PT_SYSEX,12,80) -- set edit mode ON
