@@ -1,0 +1,857 @@
+
+deviceId = 1-- the device ID used in the E1 preset
+device = devices.get(deviceId)
+devPort = device:getPort() -- the port on the Electra 
+channel = device:getChannel() -- the MIDI channel
+--tempo = 100
+tempo_switch = 1
+--how to make sysexblock a global and how to call set tap tempo from button
+
+function getPedalType()
+    local pedalselectcontrol = controls.get(9)
+    local pedaldefault = pedalselectcontrol:getValue("value")
+    local defaulttype = pedaldefault:getDefault()
+    return defaulttype
+end
+
+-- Utility function to convert a number to a list of bits
+local function getbits(value, nbr_of_bits)
+    local bitlist = {}
+    for i = nbr_of_bits, 1, -1 do
+        table.insert(bitlist, 1, value % 2)
+        value = math.floor(value / 2)
+    end
+    return bitlist
+end
+
+-- Utility function to convert a list of bits to a number
+local function bin_to_int(bits)
+    local value = 0
+    for i = 1, #bits do
+        value = value + bits[i] * (2 ^ (#bits - i))
+    end
+    return value
+end
+
+-- Function to convert SysexBlock to a list of numbers
+local function sysexBlockToList(sysexBlock)
+    local sysexList = {}
+    for i = 1, sysexBlock:getLength() do
+        table.insert(sysexList, sysexBlock:peek(i))
+    end
+    return sysexList
+end
+
+-- Function to replace a specific bit in a byte within the data list
+local function replace_bit(data, byte_position, bit_position, new_bit)
+    local byte = data[byte_position]
+    local bits = getbits(byte, 7)  -- Convert the byte to its bit representation
+    bits[bit_position] = new_bit   -- Replace the specific bit
+    data[byte_position] = bin_to_int(bits)  -- Convert the bits back to a byte and store it
+end
+
+--fader tempo is set to show the pedal tempo or a value to set the pedal to
+--[[ function fader_tempo(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+    local fader_tempo_value = onVal
+    print ("fadertempo =" .. onVal)
+     if (tempo_switch == 1) then
+        print("true")
+        print ("fadertempotempo =" .. fader_tempo_value)
+        tempo = fader_tempo_value
+        control:setName("set tempo")
+        else
+        tempo = patch_tempo
+        print("false")
+        print ("patchtempo =" .. tempo)
+        control:setName("patch tempo")
+    end
+end ]]
+
+-------------------------still having issues passing values use controls.get() instead
+
+function fader_tempo(valueObject, value)
+    local control = valueObject:getControl()
+    local fader_tempo_value = valueObject:getMessage():getValue()
+    local message = valueObject:getMessage()
+   -- local onVal = valueObject:getMessage():getValue()
+    print ("pretempo =" .. myvalue)
+     if (tempo_switch == 0) then
+--[[         listA = controls.get(37)
+        valueA = listA:getValue("value")
+        valueA = myvalue ]]
+        message:setValue(myvalue)
+             --parameterMap.set (deviceId, PT_CC7, 37, last_fader_tempo_value)
+        --tempo = get_tempo_setting(valueObject, value)
+        fader_tempo_value = myvalue
+        print ("patchtempo =" .. myvalue)
+        control:setName("patchtempo " .. myvalue)
+         --parameterMap.set (deviceId, PT_CC7, 199, myvalue);
+        --fader_tempo(valueObject, myvalue)
+        
+        print("false")
+
+    else
+
+                
+        print("true")
+        print ("fadertempo =" .. fader_tempo_value)
+       -- parameterMap.set (deviceId, PT_CC7, 60, myvalue);
+        control:setName("set tempo" .. fader_tempo_value)
+        --return tempo
+
+    end
+    tempo = fader_tempo_value
+   -- local last_fader_tempo_value = fader_tempo_value 
+    
+end
+
+
+
+-- get the tempo stored on the pedal
+--[[ function get_tempo_setting(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+    patch_tempo = onVal
+    --return patch_tempo
+end ]]
+
+
+--page2 patch tempo
+
+--[[ function get_tempo_setting(valueObject, value)
+    local patch_tempo = value
+    print ("patcher" .. patch_tempo)
+    return patch_tempo
+end ]]
+
+-- set this to on then set tempo with fader and send modified patch to pedal
+function switch_tempo(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+    if (onVal == 1) then
+      control:setName("new tempo")
+      tempo_switch = 1
+    else
+      control:setName("patch tempo")
+      tempo_switch = 0
+    end
+    
+    print ("switch" .. tempo_switch)
+end
+
+
+
+-- Function to set the tempo using the tempo fader values
+function set_tap_tempo(sysexBlock, devPort, tempo)
+    -- Ensure tap_tempo is within the valid range
+    if tempo < 40 or tempo > 250 then
+        tempo = 120
+    end
+    --tempo = tempo + 1
+    local tempo_bin = getbits(tempo, 8)
+    print("tempo_bin: ", table.concat(tempo_bin, ","))
+
+    -- Convert sysexBlock to a list of numbers
+
+    local data = sysexBlockToList(sysexBlock)
+
+    -- Replace bits according to the correct positions
+    replace_bit(data, 132, 3, tempo_bin[1])
+    replace_bit(data, 132, 4, tempo_bin[2])
+    replace_bit(data, 132, 5, tempo_bin[3])
+    replace_bit(data, 132, 6, tempo_bin[4])
+    replace_bit(data, 132, 7, tempo_bin[5])
+    replace_bit(data, 126, 5, tempo_bin[6])
+    replace_bit(data, 131, 2, tempo_bin[7])  -- Correct position for tempo bit 2
+    replace_bit(data, 131, 1, tempo_bin[8])  -- Correct position for tempo bit 1
+
+    -- Send the new patch data back to the device
+    midi.sendSysex(devPort, data)
+end
+
+
+
+-- Example usage within patch.onResponse
+patch.onResponse = function(device, responseId, sysexBlock)
+    -- Handle the response and retrieve patch names
+    local recvSize = sysexBlock:getLength()
+    print(recvSize)
+    print("device id = " .. device.id)
+    print("device channel = " .. device.channel)
+    print("device port = " .. device.port)
+    print("responseId = " .. responseId)
+    print("manufacturer Id = " .. sysexBlock:getManufacturerSysexId())
+
+    -- Print the received data
+    for i = 1, sysexBlock:getLength() do
+        print("data[" .. i .. "] = " .. sysexBlock:peek(i))
+    end
+
+    set_patch_name(sysexBlock)
+    
+    --get the fx names and set control labels
+    --[[ FX[0] = FXtypeMangler(sysexBlock:peek(6) + sysexBlock:peek(5) & B01000000 << 1, sysexBlock:peek(7), sysexBlock:peek(9))
+    FX[1] = FXtypeMangler(sysexBlock:peek(26) + sysexBlock:peek(21) & B00000100 << 5, sysexBlock:peek(27), sysexBlock:peek(30))
+    FX[2] = FXtypeMangler(sysexBlock:peek(47) + sysexBlock:peek(45) & B00100000 << 2, sysexBlock:peek(48), sysexBlock:peek(50))
+    FX[3] = FXtypeMangler(sysexBlock:peek(67) + sysexBlock:peek(61) & B00000010 << 6, sysexBlock:peek(68), sysexBlock:peek(71))
+    FX[4] = FXtypeMangler(sysexBlock:peek(88) + sysexBlock:peek(85) & B00010000 << 3, sysexBlock:peek(89), sysexBlock:peek(91))
+    FX[5] = FXtypeMangler(sysexBlock:peek(108) + sysexBlock:peek(101) & B00000001 << 7, sysexBlock:peek(110), sysexBlock:peek(112)) ]]
+    
+    -- the initial tempo is set using the sysex editor referencing 
+    -- Tempo bit 4 - 8 is bit 1-5 from second tempo byte (index 131)
+    -- Tempo bit 3 is bit 3 of the overflow byte! (index 125)
+    -- Tempo bit 2 and 1 are first byte bit 2 and 3 (index 130)
+    if (tempo_switch == 0) then
+    local tempoControl = controls.get(37)
+    local valuex = tempoControl:getValue()
+    local message = valuex:getMessage()
+    myvalue = message:getValue()
+    tempoControl:setName("patchtempo " .. myvalue)
+    return
+    else
+        --local mytempo = tempo
+     
+       --print ("mytempo--" .. tempo_switch)
+        set_tap_tempo(sysexBlock, device.port, tempo)  -- Set the tap tempo to acoording to value BPM as an example
+    end
+   
+end
+
+function set_patch_name(sysexBlock)
+    local lettersArray = {133, 135, 136, 137, 138, 139, 140, 142, 143, 144}
+    local patchName = ""
+
+    for i = 1, #lettersArray do
+        patchName = patchName .. string.char (sysexBlock:peek(lettersArray[i]))
+    end
+    print(patchName)
+    
+    local control = controls.get(12)
+    control:setName(patchName)
+end
+
+function process_active_fx(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+  
+   local onVal = 6 - value
+   parameterMap.set (deviceId, PT_CC7, 126,onVal );
+end
+
+function change_editor_text(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+   if (onVal == 81) then
+      control:setName("editor off")
+      else
+      control:setName("editor on")
+   end
+end
+
+function pad_add(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+    local ctl = control:getId()
+    local virtual = controls.get(29)
+    local valuex = virtual:getValue()
+    local message = valuex:getMessage()
+    local virtual_val = message:getValue()
+    local onVal = onVal + virtual_val
+    print("list = " .. onVal)
+    midi.sendProgramChange(devPort, channel, onVal)
+    --parameterMap.set (deviceId, PT_PROGRAM, ctl, onVal);
+    --control:setValue(onVal)
+end
+
+--[[ function FXtypeMangler(byte1, byte2, byte4) 
+  -- We will read three bytes from the sysex stream. All of them contain some bits that together make the FX type
+  -- Byte1 is the first byte of every fx slot
+  -- Bit one of Byte1 signals whether the effect is on or off
+  -- Bit 5-8 are all relevant for the effect type
+
+  -- Byte2 is the second byte of every fx slot
+  -- AFAIK only the first three bits are relevant for the effect type
+
+  -- Byte4 is the fourth byte of every fx stream - this one contain the effect type. The following values are known
+  -- 02: Reverb?
+  -- 04: Eq effects
+  -- 12: Chorus effects
+  -- 14: Roto effects
+  -- 16: Delay effects
+  -- 18: Reverb effects
+
+  -- We will search for the right effect type
+    local my_type = FXsearch((byte4 & 0x1F), (byte1 & 0xF8) + (byte2 & 0x0F)) -- We include bit 4 from byte1, so the difference between HD Hall and HD reverb is clear.
+    print("Input: type:" + string.format(byte4 & 0x1F) + ", fx:" + string.format((byte1 & 0xF8) + (byte2 & 0x0F)))
+  -- Then we will return the effect index + the effect state
+    return (my_type << 1) + (byte1 & 1)
+end
+
+ZMS70_FX_types = { ---- Table with the name and colour for every effect of the Zoom MS70-CDR
+  {0, 0,    "---", FX_TYPE_OFF}, -- 01
+  {12, 195, "CoronaCho", FX_MODULATE_TYPE}, -- 02
+  {12, 224, "Chorus", FX_MODULATE_TYPE}, -- 03
+  {12, 33,  "VintageCE", FX_MODULATE_TYPE}, -- 04
+  {12, 227, "ANA 234Cho", FX_MODULATE_TYPE}, -- 05
+  {12, 3,   "CE-Cho5", FX_MODULATE_TYPE}, -- 06
+  {12, 35,  "Clone Chorus", FX_MODULATE_TYPE}, -- 07
+  {12, 161, "Super Cho", FX_MODULATE_TYPE}, -- 08
+  {12, 163, "Mirage Chorus", FX_MODULATE_TYPE}, -- 09
+  {12, 65,  "Stereo Cho", FX_MODULATE_TYPE}, -- 10
+  {12, 4,   "Corona Tri", FX_MODULATE_TYPE}, -- 11
+  {12, 97,  "Ensemble", FX_MODULATE_TYPE}, -- 12
+  {12, 131, "Silky Chorus", FX_MODULATE_TYPE}, -- 13
+  {12, 1,   "Detune", FX_MODULATE_TYPE}, -- 14
+  {12, 240, "Bass Chorus", FX_MODULATE_TYPE}, -- 15
+  {12, 17,  "Bass Detune", FX_MODULATE_TYPE}, -- 16
+  {12, 113, "Bass Ensemble", FX_MODULATE_TYPE}, -- 17
+  {12, 193, "Flanger", FX_MODULATE_TYPE}, -- 18
+  {12, 209, "Bass Flanger", FX_MODULATE_TYPE}, -- 19
+  {12, 2,   "Vibrato", FX_MODULATE_TYPE}, -- 20
+  {12, 96,  "Phaser", FX_MODULATE_TYPE}, -- 21
+  {12, 128, "The Vibe", FX_MODULATE_TYPE}, -- 22
+  {12, 66,  "Pitch SHFT", FX_MODULATE_TYPE}, -- 23
+  {12, 130, "HPS", FX_MODULATE_TYPE}, -- 24
+  {12, 114, "Bass Pitch", FX_MODULATE_TYPE}, -- 25
+  {12, 32,  "Duo-Trem", FX_MODULATE_TYPE}, -- 26
+  {14, 160, "Auto-Pan", FX_MODULATE_TYPE}, -- 27
+  {14, 192, "Roto Closet", FX_MODULATE_TYPE}, -- 28
+  {16, 193, "Duo Digital Dly", FX_DELAY_TYPE}, -- 29
+  {16, 16,  "Delay", FX_DELAY_TYPE}, -- 30
+  {16, 129, "Stomp Dly", FX_DELAY_TYPE}, -- 31
+  {16, 33,  "Stereo Delay", FX_DELAY_TYPE}, -- 32
+  {16, 225, "Carbon Delay", FX_DELAY_TYPE}, -- 33
+  {16, 96,  "Analog DLY", FX_DELAY_TYPE}, -- 34
+  {16, 32,  "Tape Echo", FX_DELAY_TYPE}, -- 35
+  {16, 161, "Tape Echo3", FX_DELAY_TYPE}, -- 36
+  {16, 2,   "Drive Echo", FX_DELAY_TYPE}, -- 37
+  {16, 34,  "Slapback Delay", FX_DELAY_TYPE}, -- 38
+  {16, 66,  "Smooth Delay", FX_DELAY_TYPE}, -- 39
+  {16, 160, "Multi Tap Delay", FX_DELAY_TYPE}, -- 40
+  {16, 128, "Reverse Delay", FX_DELAY_TYPE}, -- 41
+  {16, 98,  "Lo-Fi Delay", FX_DELAY_TYPE}, -- 42
+  {16, 130, "Slow Attack Dly", FX_DELAY_TYPE}, -- 43
+  {16, 192, "Dyna Delay", FX_DELAY_TYPE}, -- 44
+  {16, 162, "Tremolo Delay", FX_DELAY_TYPE}, -- 45
+  {16, 64,  "ModDelay", FX_DELAY_TYPE}, -- 46
+  {16, 97,  "Trigger Hold Dly", FX_DELAY_TYPE}, -- 47
+  {16, 194, "Filter PP-Delay", FX_DELAY_TYPE}, -- 48
+  {16, 224, "Filter Dly", FX_DELAY_TYPE}, -- 49
+  {16, 65,  "Phase Delay", FX_DELAY_TYPE}, -- 50
+  {16, 226, "Auto Pan Delay", FX_DELAY_TYPE}, -- 51
+  {16, 1,   "Pitch Delay", FX_DELAY_TYPE}, -- 52
+  {16, 3,   "ICE Delay", FX_DELAY_TYPE}, -- 53
+  {16, 80,  "ModDelay2", FX_DELAY_TYPE}, -- 54
+  {18, 24,  "HD Reverb", FX_REVERB_TYPE}, -- 55
+  {18, 128, "Spring", FX_REVERB_TYPE}, -- 56
+  {18, 129, "Spring63", FX_REVERB_TYPE}, -- 57
+  {18, 33,  "Plate", FX_REVERB_TYPE}, -- 58
+  {18, 64,  "Room", FX_REVERB_TYPE}, -- 59
+  {18, 96,  "Tiled Room", FX_REVERB_TYPE}, -- 60
+  {18, 161, "Chamber", FX_REVERB_TYPE}, -- 61
+  {18, 193, "LoFi Reverb", FX_REVERB_TYPE}, -- 62
+  {18, 32,  "Hall", FX_REVERB_TYPE}, -- 63
+  {18, 16,  "HD Hall", FX_REVERB_TYPE}, -- 64
+  {18, 225, "Church", FX_REVERB_TYPE}, -- 65
+  {18, 160, "Arena Reverb", FX_REVERB_TYPE}, -- 66
+  {18, 2,   "Cave", FX_REVERB_TYPE}, -- 67
+  {18, 34,  "Ambience", FX_REVERB_TYPE}, -- 68
+  {18, 224, "AIR", FX_REVERB_TYPE}, -- 69
+  {18, 192, "Early Reflection", FX_REVERB_TYPE}, -- 70
+  {18, 66,  "Gate Reverb", FX_REVERB_TYPE}, -- 71
+  {18, 98,  "Revere Reverb", FX_REVERB_TYPE}, -- 72
+  {18, 97,  "Slap Back Reverb", FX_REVERB_TYPE}, -- 73
+  {18, 130, "Echo", FX_REVERB_TYPE}, -- 74
+  {18, 65,  "Mod Reverb", FX_REVERB_TYPE}, -- 75
+  {18, 162, "Tremelo Reverb", FX_REVERB_TYPE}, -- 76
+  {18, 194, "Holy Flerb", FX_REVERB_TYPE}, -- 77
+  {18, 226, "Dynamic Reverb", FX_REVERB_TYPE}, -- 78
+  {18, 3,   "Shimmer Reverb", FX_REVERB_TYPE}, -- 79
+  {18, 35,  "Particle Reverb", FX_REVERB_TYPE}, -- 80
+  {18, 67,  "Space Hole", FX_REVERB_TYPE}, -- 81
+  {18, 99,  "Mangled Space", FX_REVERB_TYPE}, -- 82
+  {18, 131, "Dual Reverb", FX_REVERB_TYPE}, -- 83
+  {2, 160,  "ZNR", FX_DYNAMICS_TYPE}, -- 84
+  {4, 193,  "Stereo Gtr GEQ", FX_FILTER_TYPE}, -- 85
+  {4, 2,    "Stereo Bass GEQ", FX_FILTER_TYPE}, -- 86
+  {4, 16,   "LineSel", FX_GTR_TYPE}, -- 87
+  {12, 16,  "Tremolo", FX_MODULATE_TYPE}, -- New FX from firmware version 2.00
+  {12, 64,  "Slicer", FX_MODULATE_TYPE},
+  {12, 104, "Duo-Phase", FX_MODULATE_TYPE},
+  {12, 112,  "Warp Phaser", FX_MODULATE_TYPE},
+  {12, 177, "VinFLNGR", FX_MODULATE_TYPE},
+  {12, 225, "DynaFLNGR", FX_MODULATE_TYPE},
+  {12, 34,  "Octave", FX_MODULATE_TYPE},
+  {12, 50,  "Bass Octave", FX_MODULATE_TYPE},
+  {12, 98,  "Mono Pitch", FX_MODULATE_TYPE},
+  {12, 162, "Bend Cho", FX_MODULATE_TYPE},
+  {12, 194, "Mojo Roller", FX_MODULATE_TYPE},
+  {12, 226, "Ring Mod", FX_MODULATE_TYPE},
+  {12, 67,  "Stone Phase", FX_MODULATE_TYPE},
+  {12, 99,  "BF FLG 2", FX_MODULATE_TYPE},
+  {14, 32,  "Bit Crush", FX_MODULATE_TYPE},
+  {14, 64,  "Bomber", FX_MODULATE_TYPE},
+  {14, 96,  "Mono Synth", FX_MODULATE_TYPE},
+  {14, 128, "Z-Organ", FX_MODULATE_TYPE},
+  {2, 16,   "COMP", FX_DYNAMICS_TYPE},
+  {2, 32,   "Rock Comp", FX_DYNAMICS_TYPE},
+  {2, 64,   "M Comp", FX_DYNAMICS_TYPE},
+  {2, 96,   "Opto Comp", FX_DYNAMICS_TYPE},
+  {2, 104,  "160 COMP", FX_DYNAMICS_TYPE},
+  {2, 112,  "Limiter", FX_DYNAMICS_TYPE},
+  {2, 128,  "Slow Attack", FX_FILTER_TYPE},
+  {2, 192,  "Noise Gate", FX_DYNAMICS_TYPE},
+  {2, 224,  "Dirty Gate", FX_DYNAMICS_TYPE},
+  {2, 1,    "Orange Lim", FX_DYNAMICS_TYPE},
+  {2, 33,   "Gray Comp", FX_DYNAMICS_TYPE},
+  {2, 65,   "Dual Comp", FX_DYNAMICS_TYPE},
+  {4, 32,   "Graphic EQ", FX_FILTER_TYPE},
+  {4, 48,   "Bass Graphic EQ", FX_FILTER_TYPE},
+  {4, 64,   "Para EQ", FX_FILTER_TYPE},
+  {4, 72,   "Bass Para EQ", FX_FILTER_TYPE},
+  {4, 80,   "Splitter", FX_FILTER_TYPE},
+  {4, 88,   "Bottom B", FX_FILTER_TYPE},
+  {4, 96,   "Exciter", FX_FILTER_TYPE},
+  {4, 128,  "Comb FLTR", FX_FILTER_TYPE},
+  {4, 160,  "Auto Wah", FX_WAH_TYPE},
+  {4, 176,  "Bass Auto Wah", FX_WAH_TYPE},
+  {4, 192,  "Resonance", FX_WAH_TYPE},
+  {4, 224,  "Cry", FX_WAH_TYPE},
+  {4, 1,    "Slow Filter", FX_FILTER_TYPE},
+  {4, 17,   "Z Tron", FX_FILTER_TYPE},
+  {4, 33,   "M-Filter", FX_FILTER_TYPE},
+  {4, 41,   "A-Filter", FX_FILTER_TYPE},
+  {4, 49,   "Bass Cry", FX_WAH_TYPE},
+  {4, 65,   "STEP", FX_WAH_TYPE},
+  {4, 97,   "SEQ Filter", FX_FILTER_TYPE},
+  {4, 129,  "Random Filter", FX_FILTER_TYPE},
+  {4, 161,  "FCycle", FX_FILTER_TYPE},
+  -- Unique effects from MS-50G
+  {8, 16,   "FD Combo", FX_AMP_TYPE},
+  {8, 32,   "Deluxe-R", FX_AMP_TYPE},
+  {8, 64,   "FD Vibro", FX_AMP_TYPE},
+  {8, 96,   "US Blues", FX_AMP_TYPE},
+  {8, 128,  "VX Combo", FX_AMP_TYPE},
+  {8, 160,  "VX Jimi", FX_AMP_TYPE},
+  {8, 192,  "BG Crunch", FX_AMP_TYPE},
+  {8, 224,  "Match30", FX_AMP_TYPE},
+  {8, 1,    "Car Drive", FX_AMP_TYPE},
+  {8, 33,   "TW Rock", FX_AMP_TYPE},
+  {8, 65,   "Tone City", FX_AMP_TYPE},
+  {8, 97,   "HW Stack", FX_AMP_TYPE},
+  {8, 129,  "Tangerine", FX_AMP_TYPE},
+  {8, 161,  "B-Breaker", FX_AMP_TYPE},
+  {8, 193,  "MS Crunch", FX_AMP_TYPE},
+  {8, 225,  "MS 1959", FX_AMP_TYPE},
+  {8, 2,    "MS Drive", FX_AMP_TYPE},
+  {8, 34,   "BGN DRV", FX_AMP_TYPE},
+  {8, 66,   "BG Drive", FX_AMP_TYPE},
+  {8, 98,   "DZ Drive", FX_AMP_TYPE},
+  {8, 130,  "Alien", FX_AMP_TYPE},
+  {8, 162,  "Revo T", FX_AMP_TYPE},
+  {6, 16,   "Booster", FX_DIST_TYPE},
+  {6, 32,   "Overdrive", FX_DIST_TYPE},
+  {6, 64,   "T Scream", FX_DIST_TYPE},
+  {6, 96,   "Governor", FX_DIST_TYPE},
+  {6, 128,  "Dist +", FX_DIST_TYPE},
+  {6, 160,  "Dist 1", FX_DIST_TYPE},
+  {6, 192,  "Squeak", FX_DIST_TYPE},
+  {6, 224,  "Fuzz Smile", FX_DIST_TYPE},
+  {6, 1,    "Great Muff", FX_DIST_TYPE},
+  {6, 65,   "HotBox", FX_DIST_TYPE},
+  {6, 97,   "Z Clean", FX_DIST_TYPE},
+  {6, 129,  "Z MP1", FX_DIST_TYPE},
+  {6, 161,  "Z Bottom", FX_DIST_TYPE},
+  {6, 193,  "Z Dream", FX_DIST_TYPE},
+  {6, 225,  "Z Scream", FX_DIST_TYPE},
+  {6, 2,    "Z Neos", FX_DIST_TYPE},
+  {6, 34,   "Z Wild", FX_DIST_TYPE},
+  {6, 66,   "Zoom 9002 Lead", FX_DIST_TYPE},
+  {6, 98,   "Extreme Dist", FX_DIST_TYPE},
+  {6, 130,  "Acoustic", FX_DIST_TYPE},
+  {6, 162,  "CentaGold", FX_DIST_TYPE},
+  {6, 194,  "NYC Muff", FX_DIST_TYPE},
+  {6, 226,  "TS Drive", FX_DIST_TYPE},
+  {6, 3,    "BG Throttle", FX_DIST_TYPE},
+  {6, 35,   "Oct Fuzz", FX_DIST_TYPE},
+  {6, 67,   "BG Grid", FX_DIST_TYPE},
+  {6, 99,   "Red Crunch", FX_DIST_TYPE},
+  {6, 131,  "TB MK 1.5", FX_DIST_TYPE},
+  {6, 163,  "Sweet Drive", FX_DIST_TYPE},
+  {6, 227,  "RC Boost", FX_DIST_TYPE},
+  {6, 36,   "Dynamic Drive", FX_DIST_TYPE},
+  -- Unique effects from MS-60B that do not crash the MS70-cdr
+  {24, 65,  "T Scream", FX_DIST_TYPE},
+  {10, 128, "SMR", FX_AMP_TYPE},
+  {10, 160, "Flip Top", FX_AMP_TYPE},
+  {10, 1,   "Monotone", FX_AMP_TYPE},
+  {10, 33,  "Super B", FX_AMP_TYPE},
+  {10, 65,  "G-Krueger", FX_AMP_TYPE},
+  {10, 97,  "The Heaven", FX_AMP_TYPE},
+  {14, 112, "Bass Synth", FX_FILTER_TYPE},
+  {14, 224, "Std Syn", FX_FILTER_TYPE},
+  {14, 1,   "Syn Tlk", FX_FILTER_TYPE},
+  {14, 65,  "Defret", FX_FILTER_TYPE},
+  {14, 129, "V-Syn", FX_FILTER_TYPE},
+  {14, 161, "4VoiceSyn", FX_FILTER_TYPE},
+  {2, 48,   "D Comp", FX_DYNAMICS_TYPE},
+}
+
+
+function FXsearch(type, number) 
+    local my_type = 0
+    for i = 1, #ZMS70_FX_types do
+        if ZMS70_FX_types[i].Type == type and ZMS70_FX_types[i].Number == number
+        then
+            my_type = i
+    end
+    return my_type
+end
+end ]]
+
+
+
+
+
+
+
+--[[     local lettersArray = {133, 135, 136, 137, 138, 139, 140, 142, 143, 144}
+    local name = {}
+    local patchName = ""
+
+     for i = 1, #lettersArray do
+        patchName = patchName .. string.char (sysexBlock:peek(lettersArray[i]))
+    end
+    print(patchName) ]]
+
+
+--[[ function patch.onResponse(device, responseId, sysexBlock)
+    -- print the header information
+    local recvSize = sysexBlock:getLength ()
+    print(recvSize)
+    print("device id = " .. device.id)
+    print("device channel = " .. device.channel)
+    print("device port = " .. device.port)
+    print("responseId = " .. responseId)
+    print("manufacturer Id = " .. sysexBlock:getManufacturerSysexId())
+
+    -- print the received data
+    for i = 1, sysexBlock:getLength() do
+        print("data[" .. i .. "] = " .. sysexBlock:peek(i))
+    end
+    --132 to 143 0x84-0x8f overflow at 0x85 133 and 0x8d 141
+    local lettersArray = {133,135,136,137,138,139,140,142,143,144}
+    local name={}
+    local patchName = ""
+
+
+  for i = 1, #lettersArray do
+      
+   name[i]= sysexBlock:peek (lettersArray[i])
+        name[i]= string.char(name[i])
+
+        --print(name[i])
+
+          patchName = patchName .. string.char (
+           sysexBlock:peek (lettersArray[i])) 
+    end
+    print(patchName)
+    control = controls.get (12)
+    control:setName (patchName)
+
+end ]]
+
+
+
+
+
+
+
+
+
+
+--[[ function get_the_tempo (sysexBlock)
+    local tap_tempo = 0
+    tap_tempo = tap_tempo + 1 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[2]
+    tap_tempo = tap_tempo + 2 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[1]
+    tap_tempo = tap_tempo + 4 * ms_utils.getbits(bin(patchdata_tt[124]), 8)[5]
+    tap_tempo = tap_tempo + 8 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[7]
+    tap_tempo = tap_tempo + 16 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[6]
+    tap_tempo = tap_tempo + 32 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[5]
+    tap_tempo = tap_tempo + 64 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[4]
+    tap_tempo = tap_tempo + 128 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[3]
+    return tap_tempo ]]
+
+
+
+--[[ function get_fx_count(valueObject, value)
+    -- your code goes here
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+   print("fxcount", onVal)
+end ]]
+
+
+
+
+--[[ local function bin_to_int(listofbits)
+    local a = 0
+    for i = 1, #listofbits do
+        a = a + math.pow(2, #listofbits - i) * listofbits[i]
+    end
+    return a
+end
+
+
+function get_number_of_effects(patchdata)
+    return bin_to_int({getbits(bit.tohex(patchdata[130]), 8)[4], getbits(bit.tohex(patchdata[130]), 8)[5], getbits(bit.tohex(patchdata[130]), 8)[6]})
+end ]]
+
+--[[ function patch.onRequest (device)
+   print ("Requesting global data")
+   local sysexMsg = {16, 8, 1, 7, 1, currentProgram}
+   midi.sendSysex (PORT_1, sysexMsg)
+end ]]
+
+
+-- this patch onRequest() function is more complicated than usual mainly because we needed to pull back 3 different
+-- sysex buffers to get all the data we need.  Each dump is a different size and we pull them is a particular order.
+-- the first sysex dump is the global data startedby the onRequest() funtion above.
+--  I will mark the area you can disgard if you only need to handle a single dump.
+-- 
+--[[ function patch.onResponse (device, responseId, sysexBlock)
+   -- first thing to do is always check the size and if it is not right, throw it away
+   local recvSize = sysexBlock:getLength ()
+
+   -- here is where we start the dance of receiving one sysex dump and then ask for another.
+   -- if you only need to handle one dump, you can delete everything between the DELETE comments
+   if (recvSize == 668) then
+      print (string.format("Received patch data. length = %d", recvSize))
+      -- This will be the final/third sysex dump and has the bulk of what we need
+      --  so we will fall all the way out of the if-else-end block and process what we have.
+      -- DELETE
+   elseif (recvSize == 335) then
+      print (string.format("Received global data. length = %d", recvSize))
+      -- this is the first sysex dump we get back.  Grab a few bits of data and ask for the next thing
+      -- note these are single byte data items so we do not need to call our swap() routine yet.
+      -- setting base channel, echo, clock
+      -- sysexBlock.peek() simply looks at a given byte in the dump
+      currentChannel =  sysexBlock:peek(54)
+      -- again - you really need to understand where your data is located in the dump and 
+      --  also which parameter number is mapped to that data (and by extension what kind of on screen control is allowed to change that value)
+      parameterMap.set(1, PT_SYSEX, 43, currentChannel)
+      parameterMap.set(1, PT_SYSEX, 44, sysexBlock:peek(56))
+      parameterMap.set(1, PT_SYSEX, 45, sysexBlock:peek(58))
+      
+      -- setting MIDI pedals E1-E4 CC number
+      -- here we start taking pairs of bytes to make the correct data value for each parameter.
+      -- seek() positions our read cursor at a particular byte in the dump
+      sysexBlock:seek(45)
+      for i=46, 49 do
+         -- read each pair of bytes and send them to our mask and swap function
+         local firstB = sysexBlock:read()
+         local secondB  = sysexBlock:read()
+         parameterMap.set(1, PT_SYSEX, i, makeSwapB(firstB, secondB))
+      end
+
+      print ("Requesting edit buffer")
+      -- we got the data we needed from this dump, ask for the next one.
+      -- note that we have to finish processing the first dump before asking for the second (and third) ones.
+      -- putting calls to send sysex dumps for all 3 buffers in the original call does not work
+      -- the asynchronous timing of the dumps and the response time of the device to a request all conspire 
+      -- to hose up what you are trying to do.  Be serial, it does not take too long in the grand scheme of things
+      local sysexMsg = {16, 8, 1, 7, 3, currentProgram}
+      midi.sendSysex (PORT_1, sysexMsg)
+      return
+   elseif (recvSize == 961) then
+      print (string.format("Received edit buffer. length = %d", recvSize))
+      -- more of the same.  Get data, transform it into what we need, store it
+      local firstB = sysexBlock:peek(220)
+      local secondB  = sysexBlock:peek(221)
+      local endBeat = makeSwapB(firstB, secondB)
+      parameterMap.set(1, PT_SYSEX, 26, endBeat)
+      
+      print ("Requesting patch data")
+      -- final call to getthe third sysex dump
+      local sysexMsg = {16, 8, 1, 7, 0, currentProgram}
+      midi.sendSysex (PORT_1, sysexMsg)
+      return
+   else
+      print (string.format("Received wrong size sysex, length = %d", recvSize))
+      return
+      -- DELETE
+   end ]]
+   
+
+
+
+
+
+
+--[[ function toggleControl(control)
+    control:setVisible(not control:isVisible())
+end ]]
+
+
+
+--[[
+
+function patch.onResponse (device, responseId, sysexBlock)
+    -- print the header information
+    print ("device id = " .. device.id)
+    print ("device channel = " .. device.channel)
+    print ("device port = " .. device.port)
+    print ("responseId = " .. responseId)
+    print ("manufacturer Id = " .. sysexBlock:getManufacturerSysexId ())
+
+    -- print the received data
+    for i = 1, sysexBlock:getLength () do
+        print (string.format ("data[%d] = %d", i, sysexBlock:peek (i)))
+    end
+
+    -- update two parameters
+    --parameterMap.set (device.id, PT_CC7, 1, sysexBlock:peek (7));
+    --parameterMap.set (device.id, PT_CC7, 2, sysexBlock:peek (8));
+end ]]
+
+--[[ for key, value in  pairs(name) do
+  print(key, value)
+end ]]
+ --print(table.concat(name))
+
+
+
+--[[ def get_tap_tempo():
+    patchdata_tt= retrieve_patch_data()
+    tap_tempo = 0
+    tap_tempo = tap_tempo + 1 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[2]
+    tap_tempo = tap_tempo + 2 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[1]
+    tap_tempo = tap_tempo + 4 * ms_utils.getbits(bin(patchdata_tt[124]), 8)[5]
+    tap_tempo = tap_tempo + 8 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[7]
+    tap_tempo = tap_tempo + 16 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[6]
+    tap_tempo = tap_tempo + 32 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[5]
+    tap_tempo = tap_tempo + 64 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[4]
+    tap_tempo = tap_tempo + 128 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[3]
+    return tap_tempo
+ 
+def set_tap_tempo(tap_tempo):
+    #Note: Any tempo set below 40 or above 250 would not work on the Multistomp, but set it to 120.
+    patchdata_tt= retrieve_patch_data()
+    tap_tempo_bin= ms_utils.getbits(bin(tap_tempo), 8)
+    newpatchdata_tt= ms_utils.replace_bit(patchdata_tt, 129, 2, tap_tempo_bin[7])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 129, 1, tap_tempo_bin[6])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 124, 5, tap_tempo_bin[5])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 7, tap_tempo_bin[4])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 6, tap_tempo_bin[3])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 5, tap_tempo_bin[2])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 4, tap_tempo_bin[1])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 3, tap_tempo_bin[0])    
+    new_patch_message= mido.Message('sysex', data=newpatchdata_tt)
+    ms_utils.send_message(new_patch_message) ]]
+
+
+
+
+
+--[[ function set_tap_tempo(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+   -- #Note: Any tempo set below 40 or above 250 would not work on the Multistomp, but set it to 120.
+    patchdata_tt = retrieve_patch_data()
+    tap_tempo_bin= ms_utils.getbits(bin(tap_tempo), 8)
+    newpatchdata_tt= ms_utils.replace_bit(patchdata_tt, 129, 2, tap_tempo_bin[7])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 129, 1, tap_tempo_bin[6])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 124, 5, tap_tempo_bin[5])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 7, tap_tempo_bin[4])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 6, tap_tempo_bin[3])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 5, tap_tempo_bin[2])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 4, tap_tempo_bin[1])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 3, tap_tempo_bin[0])    
+    new_patch_message= mido.Message('sysex', data=newpatchdata_tt)
+    ms_utils.send_message(new_patch_message)  ]]
+
+--[[ function setPedalSelect(valueObject, value)
+    local control = valueObject:getControl()
+    local onVal = valueObject:getMessage():getValue()
+    print(onval)
+    -- your code goes here
+end ]]
+
+-----------------------------------------------------
+--[[ maybe change get tempo pad to list with 3 options 
+1. tempo = patch tempo
+2. modify tempo
+3. set tempo ]]
+
+------------------------------------------------------
+--example for getting values 
+
+
+--[[ 
+changevalue = 100
+function change_fader(valueObject, value)
+   local newval = value -- minimal code to set a variable to fader value
+   newval = changevalue -- set the local variable value to equal the global variable value
+   parameterMap.set(devId, PT_VIRTUAL, 1043, newval)
+   --the code below also worked
+  -- local this_fader = changevalue -- makes the global variable local
+  -- local newval = valueObject:getMessage():getValue() --gets the value message from the fader
+  -- newval = this_fader --sets the fader value to the global variable value
+end
+
+function change_fader_number(valueObject, value)
+   changevalue = value -- minimal code to set a variable to fader value and set the global value 
+   print("changeval " .. changevalue) -- print the value 
+   change_fader(valueObject, value) -- now call the other function to have it continuosly update
+    --if you don't call the function the other fader will update only when adjusted which acts like a snap to value
+   -------------------------------------------------------
+   --example of getting value using controls.get()
+   local volumeControl = controls.get(20)
+   local valuex = volumeControl:getValue()
+   local message = valuex:getMessage()
+   local myvalue = message:getValue()
+   print("got Control with Id " .. volumeControl:getId())
+   print("got Control with Id " .. myvalue)
+end ]]
+
+--patch_tempo = 100
+--function change_fader(valueObject, value)
+ --  local newval = value -- minimal code to set a variable to fader value
+  -- newval = patch_tempo -- set the local variable value to equal the global variable value
+  -- parameterMap.set(devId, PT_VIRTUAL, 1043, newval)
+   --the code below also worked
+  -- local this_fader = changevalue -- makes the global variable local
+  -- local newval = valueObject:getMessage():getValue() --gets the value message from the fader
+  -- newval = this_fader --sets the fader value to the global variable value
+--end
+--[[ 
+function get_patch_tempo(valueObject, value)
+   patch_tempo = value -- minimal code to set a variable to fader value and set the global value 
+   print("changeval " .. patch_tempo) -- print the value 
+   change_fader(valueObject, value) -- now call the other function to have it continuosly update
+    --if you don't call the function the other fader will update only when adjusted which acts like a snap to value
+   -------------------------------------------------------
+end
+
+function get_patch_tempo(valueObject, value)
+   patch_tempo = value -- minimal code to set a variable to fader value and set the global value 
+   print("changeval " .. patch_tempo) -- print the value 
+   change_fader(valueObject, value) -- now call the other function to have it continuosly update
+    --if you don't call the function the other fader will update only when adjusted which acts like a snap to value
+   -------------------------------------------------------
+   --example of getting value using controls.get()
+   local volumeControl = controls.get(20)
+   local valuex = volumeControl:getValue()
+   local message = valuex:getMessage()
+   local myvalue = message:getValue()
+   print("got Control with Id " .. volumeControl:getId())
+   print("got Control with Id " .. myvalue)
+end
+
+function switch_patch_tempo(valueObject, value)
+   local fpatch_switch = value -- minimal code to set a variable to fader value and set the global value 
+   if patch_switch = 0 then
+    get_patch_tempo(valueObject, value)
+end ]]
