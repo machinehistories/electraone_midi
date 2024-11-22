@@ -84,20 +84,84 @@ param 15 fxtype
 param 136 category name
 
 
+active_fx
+b124 6,6 0
+b120 3,3 1
+b125 0,0 2
+
+fx_count
+b125 2,4 0
+
+pedal_tempo
+b125 5,6 0
+b120 2,2 2
+b126 0,4 3
+
+def switch_fx(switch_step):
+    patchdata= retrieve_patch_data()
+    fx_focus= ms_utils.get_fx_focus(patchdata)
+    number_of_fx= ms_utils.get_number_of_effects(patchdata)
+    nrm_fx_focus= fx_focus - (6 - number_of_fx) #normalized fx focus means that the fx furthest to the left is always at slot 0.
+    pot_nrm_fx_focus= nrm_fx_focus + switch_step    
+    if pot_nrm_fx_focus >= 0 and pot_nrm_fx_focus < number_of_fx:
+        #print("...Switching FX from ", nrm_fx_focus, " to ", pot_nrm_fx_focus)
+        pot_fx_focus= pot_nrm_fx_focus + 6 - number_of_fx
+        pot_fx_focus_bin= ms_utils.getbits(bin(pot_fx_focus), 8)
+        newpatchdata= ms_utils.replace_bit(patchdata, 128, 1, pot_fx_focus_bin[7])
+        newpatchdata= ms_utils.replace_bit(newpatchdata, 124, 4, pot_fx_focus_bin[6])
+        newpatchdata= ms_utils.replace_bit(newpatchdata, 129, 7, pot_fx_focus_bin[5])
+        new_patch_message= mido.Message('sysex', data=newpatchdata)
+        ms_utils.send_message(new_patch_message)
+        return 1
+    else:
+        return 0
+
+
+  local pot_fx_focus_bin = getbits(fx_num, 8)
+  replace_bit(data, 130, 1, pot_fx_focus_bin[8])
+  replace_bit(data, 126, 4, pot_fx_focus_bin[7])
+  replace_bit(data, 131, 7, pot_fx_focus_bin[6])
+
+
+def get_tap_tempo():
+    patchdata_tt= retrieve_patch_data()
+    tap_tempo = 0
+    tap_tempo = tap_tempo + 1 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[2]
+    tap_tempo = tap_tempo + 2 * ms_utils.getbits(bin(patchdata_tt[129]), 8)[1]
+    tap_tempo = tap_tempo + 4 * ms_utils.getbits(bin(patchdata_tt[124]), 8)[5]
+    tap_tempo = tap_tempo + 8 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[7]
+    tap_tempo = tap_tempo + 16 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[6]
+    tap_tempo = tap_tempo + 32 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[5]
+    tap_tempo = tap_tempo + 64 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[4]
+    tap_tempo = tap_tempo + 128 * ms_utils.getbits(bin(patchdata_tt[130]), 8)[3]
+    return tap_tempo
+ 
+def set_tap_tempo(tap_tempo):
+    #Note: Any tempo set below 40 or above 250 would not work on the Multistomp, but set it to 120.
+    patchdata_tt= retrieve_patch_data()
+    tap_tempo_bin= ms_utils.getbits(bin(tap_tempo), 8)
+    newpatchdata_tt= ms_utils.replace_bit(patchdata_tt, 129, 2, tap_tempo_bin[7])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 129, 1, tap_tempo_bin[6])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 124, 5, tap_tempo_bin[5])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 7, tap_tempo_bin[4])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 6, tap_tempo_bin[3])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 5, tap_tempo_bin[2])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 4, tap_tempo_bin[1])
+    newpatchdata_tt= ms_utils.replace_bit(newpatchdata_tt, 130, 3, tap_tempo_bin[0])    
+    new_patch_message= mido.Message('sysex', data=newpatchdata_tt)
+    ms_utils.send_message(new_patch_message)
 
 
 
-pot4
-b 10 4,6 0
-b 8 5,5 3
-b 11 0,3 4
-
-pot 5 
-b 11 4,6 0
-b 8 4,4 3
-b 0,3 4
-
-pot 6
+Replace bits according to the correct positions
+    replace_bit(data, 132, 3, tempo_bin[1])
+    replace_bit(data, 132, 4, tempo_bin[2])
+    replace_bit(data, 132, 5, tempo_bin[3])
+    replace_bit(data, 132, 6, tempo_bin[4])
+    replace_bit(data, 132, 7, tempo_bin[5])
+    replace_bit(data, 126, 5, tempo_bin[6])
+    replace_bit(data, 131, 2, tempo_bin[7])  -- Correct position for tempo bit 2
+    replace_bit(data, 131, 1, tempo_bin[8])  
 
 
 
